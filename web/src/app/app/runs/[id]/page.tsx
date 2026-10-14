@@ -2,14 +2,13 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { api, RunItem } from '@/lib/api';
 import {
   RunStatusBadge,
   SeverityBadge,
   DomainBadge,
   ConfidenceBadge,
-  RegressionBadge,
 } from '@/components/primitives/Badge';
 import { IssuePreview } from '@/components/IssuePreview';
 import { LogViewer } from '@/components/primitives/LogViewer';
@@ -38,24 +37,29 @@ import {
   Sparkles,
   Info,
   ShieldAlert,
+  ArrowRight,
+  Slash,
+  CheckSquare,
 } from 'lucide-react';
 
 export default function RunDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const id = params?.id as string;
 
   const [run, setRun] = useState<RunItem | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'diff' | 'stack' | 'logs' | 'preview'>('overview');
   const [copiedSha, setCopiedSha] = useState(false);
-  const [approving, setApproving] = useState(false);
+  const [acting, setActing] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
     if (id) {
       setLoading(true);
-      api.getRunById(id)
+      api
+        .getRunById(id)
         .then((data) => {
           if (mounted) setRun(data);
         })
@@ -68,40 +72,92 @@ export default function RunDetailPage() {
     };
   }, [id]);
 
-  const handleApprove = async () => {
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  // Gate 1 Actions
+  const handleGate1Approve = async () => {
     if (!run) return;
-    setApproving(true);
+    setActing(true);
     try {
-      const updated = await api.approveRun(run.id);
+      const updated = await api.gate1Approve(run.id, {
+        reviewer: 'operator',
+        notes: 'Operator approved raw crash for AI investigation',
+      });
       setRun(updated);
-      setToastMessage('Approved draft and published GitHub issue.');
-      setTimeout(() => setToastMessage(null), 4000);
+      showToast('Gate 1 approved! AI & Git orchestration pipeline executed.');
+    } catch (err: any) {
+      alert(err?.message || 'Error approving Gate 1');
     } finally {
-      setApproving(false);
+      setActing(false);
     }
   };
 
-  const handleReject = async () => {
+  const handleGate1Dismiss = async () => {
     if (!run) return;
+    setActing(true);
     try {
-      const updated = await api.rejectRun(run.id, 'Operator manual rejection');
+      const updated = await api.gate1Dismiss(run.id, {
+        reviewer: 'operator',
+        reason: 'Dismissed by operator as non-actionable noise',
+      });
       setRun(updated);
-      setToastMessage('Draft discarded.');
-      setTimeout(() => setToastMessage(null), 4000);
+      showToast('Gate 1 dismissed. Staged incident archived with 0 AI tokens spent.');
+    } catch (err: any) {
+      alert(err?.message || 'Error dismissing Gate 1');
+    } finally {
+      setActing(false);
+    }
+  };
+
+  // Gate 2 Actions
+  const handleGate2Approve = async () => {
+    if (!run) return;
+    setActing(true);
+    try {
+      const updated = await api.gate2Approve(run.id, {
+        reviewer: 'operator',
+        notes: 'Human operator signed off draft issue for official publication',
+      });
+      setRun(updated);
+      showToast('Gate 2 approved! GitHub issue opened & Slack card dispatched.');
+    } catch (err: any) {
+      alert(err?.message || 'Error approving draft');
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const handleGate2Reject = async () => {
+    if (!run) return;
+    setActing(true);
+    try {
+      const updated = await api.gate2Reject(run.id, {
+        reviewer: 'operator',
+        reason: 'Operator rejected draft without opening GitHub issue',
+      });
+      setRun(updated);
+      showToast('Gate 2 rejected. Draft discarded without opening GitHub issue.');
     } catch (err: any) {
       alert(err?.message || 'Error rejecting draft');
+    } finally {
+      setActing(false);
     }
   };
 
   const handleRerun = async () => {
     if (!run) return;
+    setActing(true);
     try {
       const updated = await api.rerunTriage(run.id);
       setRun(updated);
-      setToastMessage('Triage pipeline restarted.');
-      setTimeout(() => setToastMessage(null), 4000);
+      showToast('Triage pipeline restarted.');
     } catch (err: any) {
       alert(err?.message || 'Error rerunning triage');
+    } finally {
+      setActing(false);
     }
   };
 
@@ -115,7 +171,7 @@ export default function RunDetailPage() {
     return (
       <div className="py-24 text-center space-y-3">
         <div className="w-7 h-7 border-2 border-purple-600 border-t-transparent rounded-full animate-spin mx-auto" />
-        <p className="text-xs text-text-muted font-medium">Loading deployment and triage telemetry...</p>
+        <p className="text-xs text-text-muted font-medium">Loading Server B incident state &amp; audit trail...</p>
       </div>
     );
   }
@@ -136,10 +192,24 @@ export default function RunDetailPage() {
     );
   }
 
-  const shortSha = run.culprit.sha ? run.culprit.sha.slice(0, 7) : 'unknown';
+  const isGate1 = run.status === 'staged_raw' || run.status === 'received';
+  const isGate2 = run.status === 'staged_draft' || run.status === 'draft_ready' || run.status === 'pending_approval';
   const isApproved = run.status === 'approved' || run.status === 'published';
-  const isPending = run.status === 'pending_approval' || run.status === 'draft_ready';
+  const isDismissed = run.status === 'dismissed';
   const isRejected = run.status === 'rejected';
+
+  const shortSha = run.culprit?.sha ? run.culprit.sha.slice(0, 7) : 'pending';
+  const culpritAuthor = run.custom_assignee || run.culprit?.author_login || 'octocat';
+  const culpritDiff = run.culprit?.diff || '--- Git Blame Correlator has not been executed yet ---';
+  const hypothesis =
+    run.explanation?.root_cause_hypothesis ||
+    (isGate1
+      ? 'Awaiting Gate 1 approval. Event is currently held in staged_raw (0 AI tokens spent).'
+      : 'Automated synthesis analyzing call stack and recent commit diff.');
+  const checklist =
+    run.explanation?.checklist && run.explanation.checklist.length > 0
+      ? run.explanation.checklist
+      : ['Verify stack frame bounds', 'Inspect suspect commit diff', 'Validate fix in staging'];
 
   return (
     <div className="space-y-5 animate-in fade-in duration-200">
@@ -151,31 +221,153 @@ export default function RunDetailPage() {
         </div>
       )}
 
-      {/* Render Banner */}
-      <div className="flex items-center justify-between p-3 rounded-lg bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/40 text-xs text-purple-900 dark:text-purple-200">
-        <div className="flex items-center gap-2">
-          <Info className="w-4 h-4 text-purple-600 shrink-0" />
-          <span>
-            Production listener active on <code className="font-mono font-medium">/webhook/sentry</code>.
-            Correlating git history at release SHA with LLM verification checklist.
+      {/* Top Breadcrumb & Dual-Gate Flow Stepper */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border-subtle pb-3">
+        <Link
+          href="/app/runs"
+          className="inline-flex items-center gap-1.5 text-xs text-text-muted hover:text-text-primary font-medium transition-colors"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          <span>Back to Control Center</span>
+        </Link>
+
+        {/* Server B Stage Progress Stepper */}
+        <div className="flex items-center gap-2 text-[11px] font-mono">
+          <span
+            className={`px-2 py-0.5 rounded flex items-center gap-1 ${
+              isGate1
+                ? 'bg-amber-500/20 text-amber-500 font-bold border border-amber-500/30'
+                : 'bg-canvas text-text-muted'
+            }`}
+          >
+            <span>1. Ingest (Gate 1)</span>
+          </span>
+          <ArrowRight className="w-3 h-3 text-text-muted" />
+          <span
+            className={`px-2 py-0.5 rounded flex items-center gap-1 ${
+              run.status === 'analyzing'
+                ? 'bg-blue-500/20 text-blue-400 font-bold border border-blue-500/30'
+                : 'bg-canvas text-text-muted'
+            }`}
+          >
+            <span>2. AI &amp; Git Pipeline</span>
+          </span>
+          <ArrowRight className="w-3 h-3 text-text-muted" />
+          <span
+            className={`px-2 py-0.5 rounded flex items-center gap-1 ${
+              isGate2
+                ? 'bg-purple-500/20 text-purple-400 font-bold border border-purple-500/30'
+                : 'bg-canvas text-text-muted'
+            }`}
+          >
+            <span>3. Draft (Gate 2)</span>
+          </span>
+          <ArrowRight className="w-3 h-3 text-text-muted" />
+          <span
+            className={`px-2 py-0.5 rounded flex items-center gap-1 ${
+              isApproved
+                ? 'bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30'
+                : isDismissed || isRejected
+                ? 'bg-surface text-text-muted'
+                : 'bg-canvas text-text-muted'
+            }`}
+          >
+            <span>4. Dispatch</span>
           </span>
         </div>
-        <Link
-          href="/app/connections"
-          className="font-semibold text-purple-700 dark:text-purple-300 hover:underline shrink-0 ml-3"
-        >
-          View health
-        </Link>
       </div>
 
-      {/* Render Main Hero Title (Commit message format) */}
+      {/* SPECIAL CALLOUT FOR GATE 1 (STAGE 1: INGESTION STAGING QUEUE) */}
+      {isGate1 && (
+        <div className="p-4 sm:p-5 rounded-xl border border-amber-500/30 bg-amber-500/5 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-500 text-canvas font-mono">
+                  Stage 1: Gate 1 Raw Ingest
+                </span>
+                <span className="text-xs font-semibold text-text-primary">
+                  Awaiting Operator Investigation Approval
+                </span>
+              </div>
+              <p className="text-xs text-text-muted">
+                Incoming error arrived at <code className="font-mono text-purple-600">/webhook/sentry</code> and is staged as{' '}
+                <code className="font-mono text-purple-600 font-semibold">staged_raw</code>. Zero AI tokens and zero GitHub calls have been made.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={handleGate1Dismiss}
+                disabled={acting}
+                className="px-3 py-1.5 rounded-md border border-border-subtle bg-surface hover:bg-hover text-text-muted hover:text-text-primary text-xs font-medium transition-colors"
+                title="Dismiss as spam/noise with zero AI tokens spent"
+              >
+                Dismiss / Spam
+              </button>
+              <button
+                onClick={handleGate1Approve}
+                disabled={acting}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-xs transition-colors"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>{acting ? 'Running Pipeline...' : 'Approve for AI Investigation'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SPECIAL CALLOUT FOR GATE 2 (STAGE 2: DRAFT ISSUE STAGING) */}
+      {isGate2 && (
+        <div className="p-4 sm:p-5 rounded-xl border border-purple-500/30 bg-purple-500/5 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-purple-600 text-white font-mono">
+                  Stage 2: Gate 2 Review Queue
+                </span>
+                <span className="text-xs font-semibold text-text-primary">
+                  Draft Assembled • Human Review Cockpit
+                </span>
+              </div>
+              <p className="text-xs text-text-muted">
+                Stack frames normalized, suspect commit correlated via GraphQL blame, and LLM hypothesis generated. Review &amp; customize draft before opening official GitHub issue.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={handleGate2Reject}
+                disabled={acting}
+                className="px-3 py-1.5 rounded-md border border-border-subtle bg-surface hover:bg-rose-50 dark:hover:bg-rose-950/30 text-rose-600 text-xs font-medium transition-colors"
+                title="Discard draft without creating an issue"
+              >
+                Reject Draft
+              </button>
+              <button
+                onClick={handleGate2Approve}
+                disabled={acting}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-xs transition-colors"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>{acting ? 'Publishing...' : 'Approve & Publish to GitHub'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main Incident Hero Title */}
       <div className="space-y-1.5 pt-1">
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="font-mono text-purple-600 dark:text-purple-400 font-semibold uppercase tracking-wider">
-            {run.incident.exception_type}
+            {run.incident?.exception_type || 'Error'}
           </span>
           <span className="text-text-muted">•</span>
           <span className="font-mono text-text-muted">fp:{run.fingerprint}</span>
+          <RunStatusBadge status={run.status} />
+          <SeverityBadge severity={run.severity} />
           {run.is_regression && (
             <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300">
               Regression
@@ -184,41 +376,53 @@ export default function RunDetailPage() {
         </div>
 
         <h1 className="text-lg sm:text-xl font-bold text-text-primary tracking-tight leading-snug">
-          {run.culprit.message || run.incident.error_message}
+          {run.draft_title || run.culprit?.message || run.incident?.error_message}
         </h1>
 
         <p className="text-xs text-text-secondary font-mono">
-          Failing at <span className="text-purple-600 dark:text-purple-400 font-semibold">{run.incident.file_path}:{run.incident.line_number}</span>
-          {' '}• {run.incident.error_message}
+          Failing at{' '}
+          <span className="text-purple-600 dark:text-purple-400 font-semibold">
+            {run.incident?.file_path}:{run.incident?.line_number}
+          </span>{' '}
+          • {run.incident?.error_message}
         </p>
       </div>
 
-      {/* Render Signature 2x3 Metadata Card Grid */}
+      {/* Signature 2x3 Metadata Card Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {/* Card 1: STATUS */}
         <div className="p-3.5 rounded-lg border border-border-subtle bg-surface flex items-start gap-3">
           <div className="mt-0.5">
             {isApproved ? (
               <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-            ) : isRejected ? (
+            ) : isDismissed || isRejected ? (
               <XCircle className="w-4 h-4 text-rose-500" />
+            ) : isGate1 ? (
+              <Clock className="w-4 h-4 text-amber-500" />
             ) : (
-              <span className="relative flex h-3.5 w-3.5 mt-0.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-purple-600" />
-              </span>
+              <Sparkles className="w-4 h-4 text-purple-600" />
             )}
           </div>
           <div className="space-y-0.5 min-w-0">
             <div className="text-[11px] font-semibold text-text-muted uppercase tracking-wider font-mono">
-              Status
+              Stage / Status
             </div>
             <div className="font-medium text-xs text-text-primary flex items-center gap-1.5">
-              <span>{isApproved ? 'Published | Live' : isRejected ? 'Rejected' : 'Triage Ready | Needs Sign-off'}</span>
+              <span>
+                {isApproved
+                  ? 'Published | Live on GitHub'
+                  : isGate1
+                  ? 'Stage 1: Gate 1 Raw Inbox'
+                  : isGate2
+                  ? 'Stage 2: Gate 2 Draft Ready'
+                  : isDismissed
+                  ? 'Gate 1 Dismissed (Noise)'
+                  : 'Rejected'}
+              </span>
             </div>
-            {run.published_issue_url && (
+            {run.issue_url && (
               <a
-                href={run.published_issue_url}
+                href={run.issue_url}
                 target="_blank"
                 rel="noreferrer"
                 className="text-[11px] text-purple-600 dark:text-purple-400 hover:underline flex items-center gap-1 mt-0.5"
@@ -235,13 +439,13 @@ export default function RunDetailPage() {
           <Clock className="w-4 h-4 text-text-muted mt-0.5 shrink-0" />
           <div className="space-y-0.5">
             <div className="text-[11px] font-semibold text-text-muted uppercase tracking-wider font-mono">
-              Duration
+              Pipeline Duration
             </div>
             <div className="font-medium text-xs text-text-primary font-mono">
-              {(run.metrics.time_to_triage_ms / 1000).toFixed(2)}s
+              {((run.metrics?.time_to_triage_ms || 1200) / 1000).toFixed(2)}s
             </div>
             <div className="text-[11px] text-text-muted">
-              Inference: {run.metrics.llm_provider || 'llama-3.3-70b'}
+              Model: {run.metrics?.llm_provider || 'groq/llama-3.3-70b'}
             </div>
           </div>
         </div>
@@ -254,10 +458,13 @@ export default function RunDetailPage() {
               Occurred At
             </div>
             <div className="font-medium text-xs text-text-primary truncate">
-              {new Date(run.incident.first_seen || run.created_at).toLocaleString()}
+              {new Date(run.incident?.first_seen || run.created_at).toLocaleString()}
             </div>
             <div className="text-[11px] text-text-muted">
-              Release SHA: <code className="font-mono text-purple-600">{run.incident.release_sha ? run.incident.release_sha.slice(0, 7) : 'HEAD'}</code>
+              Release SHA:{' '}
+              <code className="font-mono text-purple-600">
+                {run.incident?.release_sha ? run.incident.release_sha.slice(0, 7) : 'HEAD'}
+              </code>
             </div>
           </div>
         </div>
@@ -267,18 +474,18 @@ export default function RunDetailPage() {
           <Radio className="w-4 h-4 text-purple-600 mt-0.5 shrink-0" />
           <div className="space-y-0.5">
             <div className="text-[11px] font-semibold text-text-muted uppercase tracking-wider font-mono">
-              Trigger
+              Ingress &amp; Gate Mode
             </div>
             <div className="font-medium text-xs text-text-primary">
-              Sentry Webhook (Auto-Triage)
+              {isGate1 ? 'Gate 1 Ingestion Queue' : 'Server B Orchestration'}
             </div>
             <div className="text-[11px] text-text-muted">
-              Severity: <span className="font-semibold text-text-primary">{run.severity}</span> ({run.explanation.domain})
+              Severity: <span className="font-semibold text-text-primary">{run.severity}</span>
             </div>
           </div>
         </div>
 
-        {/* Card 5: SOURCE / SUSPECT COMMIT */}
+        {/* Card 5: SUSPECT COMMIT */}
         <div className="p-3.5 rounded-lg border border-border-subtle bg-surface flex items-start gap-3">
           <GitCommit className="w-4 h-4 text-text-muted mt-0.5 shrink-0" />
           <div className="space-y-0.5 min-w-0">
@@ -286,48 +493,86 @@ export default function RunDetailPage() {
               Suspect Commit
             </div>
             <div className="flex items-center gap-1.5 font-mono text-xs">
-              <span className="text-purple-600 dark:text-purple-400 font-semibold">
-                {shortSha}
-              </span>
-              <button
-                onClick={() => handleCopySha(run.culprit.sha)}
-                className="text-text-muted hover:text-text-primary p-0.5"
-                title="Copy full SHA"
-              >
-                {copiedSha ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-              </button>
-              {run.culprit.pr_number && (
-                <span className="text-text-muted flex items-center gap-0.5">
-                  <GitPullRequest className="w-3 h-3 text-purple-600" /> #{run.culprit.pr_number}
-                </span>
+              <span className="text-purple-600 dark:text-purple-400 font-semibold">{shortSha}</span>
+              {run.culprit?.sha && (
+                <button
+                  onClick={() => handleCopySha(run.culprit!.sha)}
+                  className="text-text-muted hover:text-text-primary p-0.5"
+                  title="Copy full SHA"
+                >
+                  {copiedSha ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+                </button>
               )}
             </div>
             <div className="text-[11px] text-text-muted truncate">
-              Author: @{run.culprit.author_login} ({run.culprit.author_name})
+              Author: @{culpritAuthor}
             </div>
           </div>
         </div>
 
-        {/* Card 6: IMPACT & LOCATION */}
+        {/* Card 6: IMPACT */}
         <div className="p-3.5 rounded-lg border border-border-subtle bg-surface flex items-start gap-3">
           <Users className="w-4 h-4 text-text-muted mt-0.5 shrink-0" />
           <div className="space-y-0.5 min-w-0">
             <div className="text-[11px] font-semibold text-text-muted uppercase tracking-wider font-mono">
-              Impact & Environment
+              Impact &amp; Environment
             </div>
             <div className="font-medium text-xs text-text-primary">
-              {run.incident.users_affected} users • {run.incident.event_count} events
+              {run.incident?.users_affected || 0} users • {run.incident?.event_count || 1} events
             </div>
             <div className="text-[11px] text-text-muted">
-              Environment: <span className="text-emerald-600 font-medium">{run.incident.environment || 'production'}</span>
+              Environment:{' '}
+              <span className="text-emerald-600 font-medium">
+                {run.incident?.environment || 'production'}
+              </span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Render Action & Navigation Tabs Bar */}
+      {/* DUAL-GATE AUDIT TRAIL CARD */}
+      {(run.gate1_review || run.gate2_review) && (
+        <div className="p-4 rounded-lg border border-border-subtle bg-surface text-xs space-y-2.5">
+          <h3 className="font-semibold uppercase tracking-wider text-text-muted font-mono flex items-center gap-1.5">
+            <ShieldAlert className="w-3.5 h-3.5 text-purple-600" />
+            Server B Dual-Gate Audit Trail
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {run.gate1_review && (
+              <div className="p-3 rounded-md bg-canvas border border-border-subtle space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-text-primary">Gate 1 Ingestion Audit</span>
+                  <span className="font-mono text-[10px] text-text-muted uppercase">
+                    {run.gate1_review.action || 'approved'}
+                  </span>
+                </div>
+                <p className="text-text-secondary text-[11px]">
+                  Decided by <code className="font-mono text-purple-600">{run.gate1_review.approved_by || 'policy'}</code>
+                  {run.gate1_review.reason && ` • Notes: "${run.gate1_review.reason}"`}
+                </p>
+              </div>
+            )}
+
+            {run.gate2_review && (
+              <div className="p-3 rounded-md bg-canvas border border-border-subtle space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-text-primary">Gate 2 Draft Review Audit</span>
+                  <span className="font-mono text-[10px] text-text-muted uppercase">
+                    {run.gate2_review.action || 'approved'}
+                  </span>
+                </div>
+                <p className="text-text-secondary text-[11px]">
+                  Decided by <code className="font-mono text-purple-600">{run.gate2_review.approved_by || 'policy'}</code>
+                  {run.gate2_review.reason && ` • Notes: "${run.gate2_review.reason}"`}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Navigation Tabs Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border-subtle pt-2 pb-0">
-        {/* Left Side: Tabs */}
         <div className="flex items-center gap-1 overflow-x-auto text-xs">
           <button
             onClick={() => setActiveTab('overview')}
@@ -338,7 +583,7 @@ export default function RunDetailPage() {
             }`}
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span>Overview & Synthesis</span>
+            <span>Overview &amp; Synthesis</span>
           </button>
 
           <button
@@ -386,36 +631,55 @@ export default function RunDetailPage() {
             }`}
           >
             <FileText className="w-3.5 h-3.5" />
-            <span>GitHub Issue Draft</span>
+            <span>GitHub Issue Draft (Gate 2)</span>
           </button>
         </div>
 
-        {/* Right Side: Quick Action Buttons (Render Action Row) */}
+        {/* Action Controls */}
         <div className="flex items-center gap-2 pb-2 sm:pb-1">
-          {isPending && (
+          {isGate1 && (
             <>
               <button
-                onClick={handleReject}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-border-subtle bg-surface hover:bg-rose-50 dark:hover:bg-rose-950/30 text-rose-600 text-xs font-medium transition-colors"
-                title="Discard this draft"
+                onClick={handleGate1Dismiss}
+                disabled={acting}
+                className="px-2.5 py-1.5 rounded-md border border-border-subtle bg-surface hover:bg-hover text-text-secondary text-xs font-medium transition-colors"
               >
-                <XCircle className="w-3.5 h-3.5" />
-                <span>Reject</span>
+                Dismiss (Spam)
               </button>
-
               <button
-                onClick={handleApprove}
-                disabled={approving}
+                onClick={handleGate1Approve}
+                disabled={acting}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-xs transition-colors"
               >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Approve for AI</span>
+              </button>
+            </>
+          )}
+
+          {isGate2 && (
+            <>
+              <button
+                onClick={handleGate2Reject}
+                disabled={acting}
+                className="px-2.5 py-1.5 rounded-md border border-border-subtle bg-surface hover:bg-rose-50 dark:hover:bg-rose-950/30 text-rose-600 text-xs font-medium transition-colors"
+              >
+                Reject
+              </button>
+              <button
+                onClick={handleGate2Approve}
+                disabled={acting}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-xs transition-colors"
+              >
                 <Send className="w-3.5 h-3.5" />
-                <span>{approving ? 'Publishing...' : 'Approve & Publish'}</span>
+                <span>Approve &amp; Publish</span>
               </button>
             </>
           )}
 
           <button
             onClick={handleRerun}
+            disabled={acting}
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-border-subtle bg-surface hover:bg-hover text-text-secondary hover:text-text-primary text-xs font-medium transition-colors"
             title="Re-run automated investigation"
           >
@@ -428,19 +692,18 @@ export default function RunDetailPage() {
       {/* Tab 1: Overview & Synthesis */}
       {activeTab === 'overview' && (
         <div className="space-y-4">
-          {/* Why It Probably Failed (LLM Root Cause Synthesis) */}
           <div className="p-4 sm:p-5 rounded-lg border border-border-subtle bg-surface space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-xs uppercase tracking-wider text-text-muted font-mono flex items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5 text-purple-600" />
-                Why It Probably Failed (Automated Synthesis)
+                Why It Probably Failed (LLM Root Cause Synthesis)
               </h3>
               <span className="text-[11px] font-mono text-text-muted">
-                Confidence: {run.explanation.confidence_level || 'high'}
+                Confidence: {run.culprit?.confidence || 'high'}
               </span>
             </div>
             <p className="text-xs text-text-primary leading-relaxed bg-canvas p-3 rounded-md border border-border-subtle font-sans">
-              {run.explanation.root_cause_hypothesis}
+              {hypothesis}
             </p>
           </div>
 
@@ -451,7 +714,7 @@ export default function RunDetailPage() {
               Verification Steps (Actionable Triage Checklist)
             </h3>
             <div className="space-y-2">
-              {run.explanation.checklist.map((step, idx) => (
+              {checklist.map((step, idx) => (
                 <div
                   key={idx}
                   className="flex items-start gap-2.5 p-2.5 rounded bg-canvas border border-border-subtle text-xs text-text-primary"
@@ -472,14 +735,11 @@ export default function RunDetailPage() {
                 <Code2 className="w-3.5 h-3.5 text-purple-600" />
                 Suspect Code Diff Preview
               </h3>
-              <button
-                onClick={() => setActiveTab('diff')}
-                className="text-xs text-purple-600 hover:underline"
-              >
+              <button onClick={() => setActiveTab('diff')} className="text-xs text-purple-600 hover:underline">
                 Expand full diff →
               </button>
             </div>
-            <DiffView diff={run.culprit.diff} filename={run.incident.file_path} />
+            <DiffView diff={culpritDiff} filename={run.incident?.file_path} />
           </div>
         </div>
       )}
@@ -490,13 +750,13 @@ export default function RunDetailPage() {
           <div className="flex items-center justify-between pb-2 border-b border-border-subtle text-xs">
             <div className="font-mono text-text-primary font-semibold flex items-center gap-2">
               <GitCommit className="w-4 h-4 text-purple-600" />
-              <span>{run.incident.file_path}</span>
+              <span>{run.incident?.file_path || 'services/app.py'}</span>
             </div>
             <div className="text-text-muted font-mono">
-              Commit {shortSha} by @{run.culprit.author_login}
+              Commit {shortSha} by @{culpritAuthor}
             </div>
           </div>
-          <DiffView diff={run.culprit.diff} filename={run.incident.file_path} />
+          <DiffView diff={culpritDiff} filename={run.incident?.file_path} />
         </div>
       )}
 
@@ -506,11 +766,11 @@ export default function RunDetailPage() {
           <div className="flex items-center justify-between pb-2 border-b border-border-subtle text-xs">
             <h3 className="font-semibold text-text-primary">Failing Stack Trace Excerpt</h3>
             <span className="text-text-muted font-mono text-[11px]">
-              Last in-app frame: line {run.incident.line_number}
+              Last in-app frame: line {run.incident?.line_number}
             </span>
           </div>
           <pre className="font-mono text-xs bg-canvas p-4 rounded-md border border-border-subtle text-text-secondary overflow-x-auto whitespace-pre leading-relaxed">
-            {run.incident.stack_excerpt || run.incident.stack_trace}
+            {run.incident?.stack_excerpt || run.incident?.stack_trace || 'No stack excerpt recorded.'}
           </pre>
         </div>
       )}
@@ -522,10 +782,17 @@ export default function RunDetailPage() {
         </div>
       )}
 
-      {/* Tab 5: GitHub Issue Draft */}
+      {/* Tab 5: GitHub Issue Draft (Gate 2 Review Cockpit) */}
       {activeTab === 'preview' && (
         <div className="rounded-lg border border-border-subtle bg-surface p-4 sm:p-6">
-          <IssuePreview run={run} />
+          <IssuePreview
+            run={run}
+            editable={isGate2}
+            onDraftSaved={(updated) => {
+              setRun(updated);
+              showToast('Draft title, assignee, and checklist saved!');
+            }}
+          />
         </div>
       )}
     </div>

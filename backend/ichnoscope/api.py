@@ -1,41 +1,84 @@
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from ichnoscope.config import get_settings
+from ichnoscope.models import GateApproval
+from ichnoscope.pipeline import execute_investigation, ingest_incident, publish_draft_issue
+from ichnoscope.policy import evaluate_policy, should_auto_publish
 from ichnoscope.publisher import publish_issue
-from ichnoscope.store import get_run, get_run_logs, list_runs, save_run
+from ichnoscope.store import (
+    ensure_default_policy,
+    get_run,
+    get_run_logs,
+    list_gate_reviews,
+    list_policies,
+    list_runs,
+    record_gate_review,
+    save_run,
+    upsert_policy,
+)
 
 router = APIRouter(prefix="/api")
 
 
+def serialize_run(run_id: str, state: Any) -> dict[str, Any]:
+    """Normalize a run for Control Center clients."""
+    inc = state.incident
+    expl = state.explanation
+    cul = state.culprit
+    return {
+        "id": run_id,
+        "status": state.status,
+        "severity": state.severity,
+        "fingerprint": state.fingerprint,
+        "is_regression": state.is_regression,
+        "issue_url": state.issue_url,
+        "project_id": state.project_id,
+        "environment": state.environment or (inc.environment if inc else None),
+        "exception_type": inc.exception_type if inc else None,
+        "error_message": inc.error_message if inc else None,
+        "file_path": inc.file_path if inc else None,
+        "line_number": inc.line_number if inc else None,
+        "draft_title": state.draft_title_override,
+        "draft_body": state.draft_body_override,
+        "custom_assignee": state.custom_assignee,
+        "gate1_review": state.gate1_review.model_dump(mode="json") if state.gate1_review else None,
+        "gate2_review": state.gate2_review.model_dump(mode="json") if state.gate2_review else None,
+        "incident": inc.model_dump(mode="json") if inc else None,
+        "explanation": expl.model_dump(mode="json") if expl else None,
+        "culprit": cul.model_dump(mode="json") if cul else None,
+        "logs_count": len(state.logs),
+    }
+
+
 @router.get("/runs")
-def api_list_runs() -> list[dict[str, Any]]:
-    """List recent incident triage runs for the dashboard."""
-    raw_runs = list_runs(limit=50)
+def api_list_runs(
+    status: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[dict[str, Any]]:
+    """List recent incident triage runs for the Control Center board."""
+    aliases = {
+        "staged_draft": {"staged_draft", "draft_ready"},
+        "draft_ready": {"staged_draft", "draft_ready"},
+        "staged_raw": {"staged_raw", "received"},
+        "analyzing": {"analyzing", "parsing", "blaming", "explaining"},
+        "dismissed": {"dismissed", "rejected"},
+    }
+    raw_runs = list_runs(limit=limit)
+    wanted = aliases.get(status, {status} if status else None)
     items: list[dict[str, Any]] = []
-
     for run_id, state in raw_runs:
-        inc = state.incident
-        expl = state.explanation
-        cul = state.culprit
-
-        items.append(
-            {
-                "id": run_id,
-                "status": state.status,
-                "severity": state.severity,
-                "fingerprint": state.fingerprint,
-                "is_regression": state.is_regression,
-                "issue_url": state.issue_url,
-                "incident": inc.model_dump(mode="json") if inc else None,
-                "explanation": expl.model_dump(mode="json") if expl else None,
-                "culprit": cul.model_dump(mode="json") if cul else None,
-                "logs_count": len(state.logs),
-            }
-        )
+        if wanted and state.status not in wanted:
+            continue
+        if severity and state.severity != severity:
+            continue
+        items.append(serialize_run(run_id, state))
     return items
 
 
@@ -46,96 +89,226 @@ def api_get_run(run_id: str) -> dict[str, Any]:
     if not state:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
-    inc = state.incident
-    expl = state.explanation
-    cul = state.culprit
     detailed_logs = get_run_logs(run_id)
 
-    return {
-        "id": run_id,
-        "status": state.status,
-        "severity": state.severity,
-        "fingerprint": state.fingerprint,
-        "is_regression": state.is_regression,
-        "issue_url": state.issue_url,
-        "incident": inc.model_dump(mode="json") if inc else None,
-        "explanation": expl.model_dump(mode="json") if expl else None,
-        "culprit": cul.model_dump(mode="json") if cul else None,
-        "logs": detailed_logs if detailed_logs else state.logs,
-    }
-
-
-from pydantic import BaseModel
+    payload = serialize_run(run_id, state)
+    payload["logs"] = detailed_logs if detailed_logs else state.logs
+    payload["gate_reviews"] = list_gate_reviews(run_id)
+    return payload
 
 
 class RejectRequest(BaseModel):
     reason: str | None = None
+    reviewer: str | None = None
 
 
-@router.post("/runs/{run_id}/approve")
-def api_approve_run(run_id: str) -> dict[str, Any]:
-    """Approve a draft issue and publish it to GitHub."""
+class GateReviewRequest(BaseModel):
+    reviewer: str | None = None
+    notes: str | None = None
+    reason: str | None = None
+    custom_assignee: str | None = None
+    title_override: str | None = None
+    body_override: str | None = None
+
+
+class DraftUpdateRequest(BaseModel):
+    draft_title: str | None = None
+    draft_body: str | None = None
+    custom_assignee: str | None = None
+
+
+class PolicyUpsertRequest(BaseModel):
+    id: str | None = None
+    name: str
+    is_active: bool = True
+    rule: dict[str, Any]
+
+
+def _require_run(run_id: str):
     state = get_run(run_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    return state
 
+
+@router.post("/runs/{run_id}/gate1/approve")
+def api_gate1_approve(run_id: str, body: GateReviewRequest | None = None) -> dict[str, Any]:
+    """Promote a raw incident from Gate 1 into the AI orchestration pipeline."""
+    state = _require_run(run_id)
+    if not state.is_gate1_pending:
+        raise HTTPException(status_code=409, detail=f"Run is not awaiting Gate 1 (status={state.status})")
+
+    reviewer = (body.reviewer if body else None) or "operator"
+    notes = (body.notes if body else None) or (body.reason if body else None)
+    state.status = "analyzing"
+    state.gate1_review = GateApproval(
+        approved_by=reviewer,
+        approved_at=datetime.now(timezone.utc),
+        reason=notes,
+        action="approve",
+    )
+    record_gate_review(run_id, "gate1", "approve", reviewer, notes=notes)
+    save_run(run_id, state)
+
+    settings = get_settings()
+    state = execute_investigation(run_id, settings=settings)
+    if state.is_gate2_pending:
+        decision = evaluate_policy(state, settings=settings)
+        if should_auto_publish(state, decision):
+            state.gate2_review = GateApproval(
+                approved_by=f"policy:{decision.matched_rule or decision.default_mode}",
+                approved_at=datetime.now(timezone.utc),
+                reason="auto_publish",
+                action="auto_promoted",
+            )
+            record_gate_review(run_id, "gate2", "auto_promoted", "policy", notes="auto_publish")
+            save_run(run_id, state)
+            state = publish_draft_issue(run_id, settings=settings)
+
+    return {
+        "id": run_id,
+        "status": state.status,
+        "message": "AI investigation pipeline completed."
+        if state.status != "analyzing"
+        else "AI investigation pipeline enqueued successfully.",
+        **serialize_run(run_id, state),
+    }
+
+
+@router.post("/runs/{run_id}/gate1/dismiss")
+def api_gate1_dismiss(run_id: str, body: GateReviewRequest | None = None) -> dict[str, Any]:
+    """Drop a raw incident at Gate 1 without spending AI tokens."""
+    state = _require_run(run_id)
+    if not state.is_gate1_pending:
+        raise HTTPException(status_code=409, detail=f"Run is not awaiting Gate 1 (status={state.status})")
+    reviewer = (body.reviewer if body else None) or "operator"
+    reason = (body.reason if body else None) or (body.notes if body else None) or "Dismissed as noise"
+    state.status = "dismissed"
+    state.gate1_review = GateApproval(
+        approved_by=reviewer,
+        approved_at=datetime.now(timezone.utc),
+        reason=reason,
+        action="dismiss",
+    )
+    record_gate_review(run_id, "gate1", "dismiss", reviewer, notes=reason)
+    state.logs.append(f"[INFO] gate1: Dismissed by {reviewer}; reason: '{reason}'")
+    save_run(run_id, state)
+    return {"id": run_id, "status": "dismissed"}
+
+
+@router.post("/runs/{run_id}/gate2/approve")
+def api_gate2_approve(run_id: str, body: GateReviewRequest | None = None) -> dict[str, Any]:
+    """Approve an AI draft and publish the GitHub issue."""
+    state = _require_run(run_id)
     if state.status == "published":
-        return {"status": "already_published", "issue_url": state.issue_url}
-
+        return {"id": run_id, "status": "already_published", "issue_url": state.issue_url}
+    if not state.is_gate2_pending:
+        raise HTTPException(status_code=409, detail=f"Run is not awaiting Gate 2 (status={state.status})")
     if not state.incident:
         raise HTTPException(status_code=400, detail="Cannot approve run without parsed incident")
 
-    settings = get_settings()
+    reviewer = (body.reviewer if body else None) or "operator"
+    if body:
+        if body.title_override:
+            state.draft_title_override = body.title_override
+        if body.body_override:
+            state.draft_body_override = body.body_override
+        if body.custom_assignee:
+            state.custom_assignee = body.custom_assignee
+    state.gate2_review = GateApproval(
+        approved_by=reviewer,
+        approved_at=datetime.now(timezone.utc),
+        reason=body.notes if body else None,
+        action="approve",
+    )
+    record_gate_review(run_id, "gate2", "approve", reviewer, notes=body.notes if body else None)
+    save_run(run_id, state)
+
     try:
-        if not settings.dry_run and not (settings.github_token and settings.github_owner and settings.github_repo_name):
-            # Graceful simulation when GitHub credentials are not yet configured
-            sim_num = 142
-            sim_url = f"https://github.com/{settings.github_repository or 'ichnoscope/wcc-demo'}/issues/{sim_num}"
-            state.status = "published"
-            state.issue_url = sim_url
-            state.logs.append(f"[INFO] admin: Approved draft; published mock issue #{sim_num} (GitHub token pending)")
-            save_run(run_id, state)
-            return {
-                "status": "published",
-                "issue_number": sim_num,
-                "issue_url": sim_url,
-            }
-
-        pub_res = publish_issue(
-            incident=state.incident,
-            culprit=state.culprit,
-            explanation=state.explanation,
-            severity=state.severity or "P3-Medium",
-            fingerprint=state.fingerprint,
-            is_regression=state.is_regression,
-            settings=settings,
+        state = publish_draft_issue(
+            run_id,
+            settings=get_settings(),
+            title_override=body.title_override if body else None,
+            body_override=body.body_override if body else None,
+            custom_assignee=body.custom_assignee if body else None,
         )
-        state.status = "published"
-        state.issue_url = pub_res.issue_url
-        state.logs.append(f"[INFO] admin: Approved draft; published issue #{pub_res.issue_number}")
-        save_run(run_id, state)
-
-        return {
-            "status": "published",
-            "issue_number": pub_res.issue_number,
-            "issue_url": pub_res.issue_url,
-        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Publishing failed: {exc}") from exc
+
+    issue_number = None
+    if state.issue_url and state.issue_url.rstrip("/").split("/")[-1].isdigit():
+        issue_number = int(state.issue_url.rstrip("/").split("/")[-1])
+    return {
+        "id": run_id,
+        "status": "published",
+        "issue_number": issue_number,
+        "issue_url": state.issue_url,
+    }
+
+
+@router.post("/runs/{run_id}/gate2/reject")
+def api_gate2_reject(run_id: str, body: GateReviewRequest | RejectRequest | None = None) -> dict[str, Any]:
+    """Reject a drafted issue without creating a GitHub issue."""
+    state = _require_run(run_id)
+    if not state.is_gate2_pending and state.status not in {"analyzing", "failed"}:
+        if state.status not in {"staged_draft", "draft_ready"}:
+            # Allow legacy reject of any non-terminal draft-like run.
+            pass
+    reviewer = (body.reviewer if body else None) or "operator"
+    reason = (body.reason if body else None) or (body.notes if body else None) or "No reason provided"
+    state.status = "rejected"
+    state.gate2_review = GateApproval(
+        approved_by=reviewer,
+        approved_at=datetime.now(timezone.utc),
+        reason=reason,
+        action="reject",
+    )
+    record_gate_review(run_id, "gate2", "reject", reviewer, notes=reason)
+    state.logs.append(f"[INFO] gate2: Rejected by {reviewer}; reason: '{reason}'")
+    save_run(run_id, state)
+    return {"id": run_id, "status": "rejected"}
+
+
+@router.patch("/runs/{run_id}/draft")
+def api_patch_draft(run_id: str, body: DraftUpdateRequest) -> dict[str, Any]:
+    """Edit the Gate 2 markdown draft before publishing."""
+    state = _require_run(run_id)
+    if not state.is_gate2_pending:
+        raise HTTPException(status_code=409, detail="Draft can only be edited while awaiting Gate 2")
+    if body.draft_title is not None:
+        state.draft_title_override = body.draft_title
+    if body.draft_body is not None:
+        state.draft_body_override = body.draft_body
+    if body.custom_assignee is not None:
+        state.custom_assignee = body.custom_assignee
+    save_run(run_id, state)
+    return serialize_run(run_id, state)
+
+
+@router.get("/policies")
+def api_list_policies() -> dict[str, Any]:
+    settings = get_settings()
+    default = ensure_default_policy(default_mode=settings.automation_mode)
+    return {"default_mode": settings.automation_mode, "policies": list_policies() or [default]}
+
+
+@router.post("/policies")
+def api_upsert_policy(req: PolicyUpsertRequest) -> dict[str, Any]:
+    policy_id = req.id or req.name.lower().replace(" ", "-")
+    saved = upsert_policy(policy_id, req.name, req.rule, is_active=req.is_active)
+    return saved
+
+
+@router.post("/runs/{run_id}/approve")
+def api_approve_run(run_id: str, body: GateReviewRequest | None = None) -> dict[str, Any]:
+    """Legacy alias for Gate 2 approve."""
+    return api_gate2_approve(run_id, body)
 
 
 @router.post("/runs/{run_id}/reject")
 def api_reject_run(run_id: str, body: RejectRequest | None = None) -> dict[str, Any]:
-    """Reject a draft issue without publishing to GitHub."""
-    state = get_run(run_id)
-    if not state:
-        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
-
-    reason = (body.reason if body else None) or "No reason provided"
-    state.status = "rejected"
-    state.logs.append(f"[INFO] admin: Rejected draft; reason: '{reason}'")
-    save_run(run_id, state)
-    return {"status": "rejected"}
+    """Legacy alias for Gate 2 reject."""
+    return api_gate2_reject(run_id, body)
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -150,6 +323,7 @@ class SettingsUpdateRequest(BaseModel):
     dry_run: bool | None = None
     slack_webhook_url: str | None = None
     admin_token: str | None = None
+    automation_mode: str | None = None
 
 
 class SlackTestRequest(BaseModel):
@@ -239,6 +413,10 @@ def api_update_settings(req: SettingsUpdateRequest) -> dict[str, Any]:
         val = req.admin_token.strip()
         os.environ["ADMIN_TOKEN"] = val
         updates["ADMIN_TOKEN"] = val
+    if req.automation_mode is not None:
+        val = req.automation_mode.strip()
+        os.environ["AUTOMATION_MODE"] = val
+        updates["AUTOMATION_MODE"] = val
 
     if updates:
         _persist_env_update(updates)
@@ -316,6 +494,13 @@ def api_get_health() -> list[dict[str, Any]]:
             "description": "Incoming webhook alert dispatcher",
             "latency_ms": 20,
         },
+        {
+            "key": "core",
+            "name": "Server B Dual-Gate Orchestrator",
+            "status": "healthy",
+            "description": "Gate 1 staging, AI pipeline, Gate 2 draft review",
+            "latency_ms": 12,
+        },
     ]
 
 
@@ -359,9 +544,5 @@ def api_replay_fixture(fixture: str = "payment_npe") -> dict[str, Any]:
 
     payload = json.loads(file_path.read_text(encoding="utf-8"))
     settings = get_settings()
-
-    state = run_pipeline(payload=payload, auto_publish=False, settings=settings)
-    run_id = state.incident.incident_id if state.incident else f"run-{abs(hash(filename)) % 1000000:06x}"
-    save_run(run_id, state)
-
+    run_id, _state, _auto = ingest_incident(payload=payload, settings=settings, apply_policy=True)
     return api_get_run(run_id)

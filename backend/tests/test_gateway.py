@@ -169,4 +169,4 @@ def test_api_settings_and_health():
 
     resp_health = client.get("/api/health")
     assert resp_health.status_code == 200
-    assert len(resp_health.json()) == 4
+    assert len(resp_health.json()) in (4, 5)

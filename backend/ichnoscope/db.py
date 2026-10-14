@@ -174,6 +174,12 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             id TEXT PRIMARY KEY,
             fingerprint TEXT NOT NULL,
             status TEXT NOT NULL,
+            severity TEXT,
+            is_regression INTEGER DEFAULT 0,
+            issue_url TEXT,
+            draft_title TEXT,
+            draft_body TEXT,
+            raw_payload TEXT,
             state_json TEXT NOT NULL,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
@@ -199,18 +205,126 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             last_comment_at REAL
         );
         """,
+        """
+        CREATE TABLE IF NOT EXISTS gate_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            gate TEXT NOT NULL,
+            action TEXT NOT NULL,
+            reviewer TEXT NOT NULL,
+            notes TEXT,
+            created_at REAL NOT NULL
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS automation_policies (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1,
+            rule_json TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS project_keys (
+            project_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            public_key TEXT UNIQUE NOT NULL,
+            secret_key TEXT NOT NULL,
+            rate_limit_min INTEGER DEFAULT 120,
+            environment TEXT DEFAULT 'production',
+            is_active INTEGER DEFAULT 1,
+            created_at REAL NOT NULL
+        );
+        """,
         "CREATE INDEX IF NOT EXISTS idx_runs_updated ON runs (updated_at DESC);",
+        "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs (status);",
         "CREATE INDEX IF NOT EXISTS idx_logs_run_id ON run_logs (run_id, timestamp);",
+        "CREATE INDEX IF NOT EXISTS idx_gate_reviews_run ON gate_reviews (run_id, gate);",
     ]
 
     if turso_url and turso_token and db_path is None and DEFAULT_RUNS_DB == "ichnoscope_runs.db":
         with TursoConnection(turso_url.strip(), turso_token.strip()) as conn:
             for stmt in tables:
                 conn.execute(stmt)
+            migrate_to_v2(conn)
         return turso_url
 
     path = get_db_path(db_path)
     with sqlite3.connect(path) as conn:
         for stmt in tables:
             conn.execute(stmt)
+        migrate_to_v2(conn)
+        conn.commit()
     return path
+
+
+def migrate_to_v2(conn: Any) -> None:
+    """Add dual-gate columns and auxiliary tables without dropping existing run data."""
+    desired_columns = {
+        "severity": "TEXT",
+        "is_regression": "INTEGER DEFAULT 0",
+        "issue_url": "TEXT",
+        "draft_title": "TEXT",
+        "draft_body": "TEXT",
+        "raw_payload": "TEXT",
+    }
+    existing: set[str] = set()
+    try:
+        cursor = conn.execute("PRAGMA table_info(runs);")
+        rows = cursor.fetchall() if cursor is not None else []
+        existing = {str(row[1]) for row in rows}
+    except Exception:  # noqa: BLE001
+        existing = set()
+
+    for name, col_type in desired_columns.items():
+        if name in existing:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {col_type};")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Skipping ALTER TABLE for %s: %s", name, exc)
+
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gate_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                gate TEXT NOT NULL,
+                action TEXT NOT NULL,
+                reviewer TEXT NOT NULL,
+                notes TEXT,
+                created_at REAL NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS automation_policies (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                rule_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_keys (
+                project_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                public_key TEXT UNIQUE NOT NULL,
+                secret_key TEXT NOT NULL,
+                rate_limit_min INTEGER DEFAULT 120,
+                environment TEXT DEFAULT 'production',
+                is_active INTEGER DEFAULT 1,
+                created_at REAL NOT NULL
+            );
+            """
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Auxiliary table create skipped: %s", exc)

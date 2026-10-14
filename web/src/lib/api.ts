@@ -43,6 +43,41 @@ export interface SystemSettings {
   slack_webhook_url?: string;
   admin_token?: string;
   auto_comment_duplicates: boolean;
+  automation_mode?: 'full_manual' | 'semi_autonomous' | 'fully_autonomous';
+}
+
+export interface GateReviewAudit {
+  gate: 'gate1' | 'gate2';
+  action: 'approve' | 'dismiss' | 'reject' | 'auto_promoted';
+  reviewer: string;
+  notes?: string;
+  created_at: number;
+}
+
+export interface PolicyRule {
+  name: string;
+  condition: {
+    environment?: string | string[];
+    severity?: string | string[];
+    exception_type?: string | string[];
+  };
+  action: {
+    gate1?: 'require_manual' | 'auto_approve' | 'auto_dismiss';
+    gate2?: 'require_manual' | 'auto_publish';
+    slack_alert?: boolean;
+  };
+}
+
+export interface PolicyDocument {
+  id: string;
+  name: string;
+  is_active: boolean;
+  rule: {
+    default_mode?: 'full_manual' | 'semi_autonomous' | 'fully_autonomous';
+    rules?: PolicyRule[];
+  };
+  created_at?: number;
+  updated_at?: number;
 }
 
 export interface RunItem {
@@ -52,6 +87,22 @@ export interface RunItem {
   fingerprint: string;
   is_regression: boolean;
   issue_url?: string;
+  draft_title?: string;
+  draft_body?: string;
+  custom_assignee?: string;
+  gate1_review?: {
+    approved_by?: string;
+    approved_at?: string;
+    reason?: string;
+    action?: string;
+  };
+  gate2_review?: {
+    approved_by?: string;
+    approved_at?: string;
+    reason?: string;
+    action?: string;
+  };
+  gate_reviews?: GateReviewAudit[];
   incident: {
     exception_type: string;
     error_message: string;
@@ -140,16 +191,26 @@ function formatBackendRun(b: any): RunItem {
   return {
     id: b.id,
     status:
-      b.status === 'draft_ready'
-        ? 'pending_approval'
+      b.status === 'staged_raw'
+        ? 'staged_raw'
+        : b.status === 'staged_draft' || b.status === 'draft_ready'
+        ? 'staged_draft'
         : b.status === 'published'
-        ? 'approved'
+        ? 'published'
+        : b.status === 'dismissed'
+        ? 'dismissed'
         : b.status,
     severity: b.severity || 'P2-High',
     fingerprint: b.fingerprint || (inc.incident_id ? inc.incident_id.slice(0, 12) : '000000000000'),
     is_regression: Boolean(b.is_regression),
     issue_url: b.issue_url || undefined,
     published_issue_url: b.issue_url || undefined,
+    draft_title: b.draft_title,
+    draft_body: b.draft_body,
+    custom_assignee: b.custom_assignee,
+    gate1_review: b.gate1_review,
+    gate2_review: b.gate2_review,
+    gate_reviews: b.gate_reviews,
     incident: {
       exception_type: inc.exception_type || 'RuntimeError',
       error_message: inc.error_message || 'Unhandled error occurred in production service',
@@ -228,14 +289,29 @@ function saveStoredRuns(runs: RunDetail[]) {
   }
 }
 
-function toRunItem(r: RunDetail): RunItem {
+function toRunItem(r: any): RunItem {
   return {
     id: r.id,
-    status: r.status === 'draft_ready' ? 'pending_approval' : r.status === 'published' ? 'approved' : r.status,
+    status:
+      r.status === 'staged_raw'
+        ? 'staged_raw'
+        : r.status === 'staged_draft' || r.status === 'draft_ready'
+        ? 'staged_draft'
+        : r.status === 'published'
+        ? 'published'
+        : r.status === 'dismissed'
+        ? 'dismissed'
+        : r.status,
     severity: r.severity,
     fingerprint: r.fingerprint,
     is_regression: true,
-    issue_url: r.issueUrl,
+    issue_url: r.issueUrl || r.issue_url,
+    draft_title: r.draft_title || (r.exceptionType ? `[Auto-triage] ${r.exceptionType}: ${r.errorMessage}` : undefined),
+    draft_body: r.draft_body || r.draftMarkdown,
+    custom_assignee: r.custom_assignee || r.suspect?.login,
+    gate1_review: r.gate1_review,
+    gate2_review: r.gate2_review,
+    gate_reviews: r.gate_reviews,
     incident: {
       exception_type: r.exceptionType,
       error_message: r.errorMessage,
@@ -249,7 +325,7 @@ function toRunItem(r: RunDetail): RunItem {
       environment: r.environment || 'production',
       release_sha: r.releaseSha,
       stack_trace: `${r.exceptionType}: ${r.errorMessage}\n  at ${r.filePath}:${r.lineNumber}`,
-      stack_excerpt: r.stackFrames.map((f) => `${f.file}:${f.line} in ${f.fn}`).join('\n'),
+      stack_excerpt: Array.isArray(r.stackFrames) ? r.stackFrames.map((f: any) => `${f.file}:${f.line} in ${f.fn}`).join('\n') : undefined,
     },
     explanation: {
       root_cause_hypothesis: r.explanation?.hypothesis || 'Potential regression in recent commits',
@@ -273,13 +349,15 @@ function toRunItem(r: RunDetail): RunItem {
       suppressed_duplicates: 0,
       llm_provider: 'llama-3.3-70b-versatile',
     },
-    logs: r.logs.map((l) => ({
-      timestamp: l.ts,
-      ts: l.ts,
-      step: l.step,
-      level: l.level,
-      message: l.message,
-    })),
+    logs: Array.isArray(r.logs)
+      ? r.logs.map((l: any) => ({
+          timestamp: l.ts,
+          ts: l.ts,
+          step: l.step,
+          level: l.level,
+          message: l.message,
+        }))
+      : [],
     created_at: r.createdAt,
     updated_at: r.updatedAt,
   };
@@ -459,6 +537,200 @@ export const api = {
     return toRunItem(updated);
   },
 
+  gate1Approve: async (id: string, options?: { reviewer?: string; notes?: string }): Promise<any> => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate1/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(options || {}),
+      });
+      if (res.ok) {
+        return await api.getRunById(id);
+      }
+    } catch {
+      // Fallback
+    }
+    const runs = getStoredRuns();
+    const idx = runs.findIndex((r) => r.id === id);
+    if (idx === -1) throw new Error('Run not found');
+    const updated: any = {
+      ...runs[idx],
+      status: 'staged_draft',
+      updatedAt: new Date().toISOString(),
+      gate1_review: {
+        action: 'approve',
+        approved_by: options?.reviewer || 'operator',
+        reason: options?.notes,
+        approved_at: new Date().toISOString(),
+      },
+    };
+    runs[idx] = updated;
+    saveStoredRuns(runs);
+    return toRunItem(updated);
+  },
+
+  gate1Dismiss: async (id: string, options?: { reviewer?: string; reason?: string }): Promise<any> => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate1/dismiss`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(options || {}),
+      });
+      if (res.ok) {
+        return await api.getRunById(id);
+      }
+    } catch {
+      // Fallback
+    }
+    const runs = getStoredRuns();
+    const idx = runs.findIndex((r) => r.id === id);
+    if (idx === -1) throw new Error('Run not found');
+    const updated: any = {
+      ...runs[idx],
+      status: 'dismissed',
+      updatedAt: new Date().toISOString(),
+      gate1_review: {
+        action: 'dismiss',
+        approved_by: options?.reviewer || 'operator',
+        reason: options?.reason || 'Dismissed as noise',
+        approved_at: new Date().toISOString(),
+      },
+    };
+    runs[idx] = updated;
+    saveStoredRuns(runs);
+    return toRunItem(updated);
+  },
+
+  gate2Approve: async (
+    id: string,
+    options?: {
+      reviewer?: string;
+      notes?: string;
+      title_override?: string;
+      body_override?: string;
+      custom_assignee?: string;
+    }
+  ): Promise<any> => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate2/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(options || {}),
+      });
+      if (res.ok) {
+        return await api.getRunById(id);
+      }
+    } catch {
+      // Fallback
+    }
+    return api.approveRun(id);
+  },
+
+  gate2Reject: async (id: string, options?: { reviewer?: string; reason?: string }): Promise<any> => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate2/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(options || {}),
+      });
+      if (res.ok) {
+        return await api.getRunById(id);
+      }
+    } catch {
+      // Fallback
+    }
+    return api.rejectRun(id, options?.reason);
+  },
+
+  updateDraft: async (
+    id: string,
+    data: { draft_title?: string; draft_body?: string; custom_assignee?: string }
+  ): Promise<any> => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/draft`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      if (res.ok) {
+        const payload = await res.json();
+        return formatBackendRun(payload);
+      }
+    } catch {
+      // Fallback
+    }
+    const runs = getStoredRuns();
+    const idx = runs.findIndex((r) => r.id === id);
+    if (idx === -1) throw new Error('Run not found');
+    const updated: any = {
+      ...runs[idx],
+      draft_title: data.draft_title ?? runs[idx].draft_title,
+      draft_body: data.draft_body ?? runs[idx].draft_body,
+      custom_assignee: data.custom_assignee ?? runs[idx].custom_assignee,
+      updatedAt: new Date().toISOString(),
+    };
+    runs[idx] = updated;
+    saveStoredRuns(runs);
+    return toRunItem(updated);
+  },
+
+  getPolicies: async (): Promise<{ default_mode: string; policies: PolicyDocument[] }> => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/policies`, { cache: 'no-store' });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // Fallback
+    }
+    return {
+      default_mode: 'semi_autonomous',
+      policies: [
+        {
+          id: 'org-default',
+          name: 'Organization Default',
+          is_active: true,
+          rule: {
+            default_mode: 'semi_autonomous',
+            rules: [
+              {
+                name: 'Production Critical Escalation',
+                condition: { environment: 'production', severity: 'P1-Critical' },
+                action: { gate1: 'auto_approve', gate2: 'auto_publish', slack_alert: true },
+              },
+              {
+                name: 'Staging Filter',
+                condition: { environment: 'staging' },
+                action: { gate1: 'require_manual', gate2: 'require_manual' },
+              },
+              {
+                name: 'Noise Suppressor',
+                condition: { exception_type: ['NotFoundHttpException', 'ChunkLoadError'] },
+                action: { gate1: 'auto_dismiss' },
+              },
+            ],
+          },
+        },
+      ],
+    };
+  },
+
+  upsertPolicy: async (policy: { id?: string; name: string; is_active: boolean; rule: any }): Promise<any> => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/policies`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(policy),
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // Fallback
+    }
+    return policy;
+  },
+
   rerunTriage: async (id: string): Promise<any> => {
     try {
       const res = await fetch(`${BACKEND_URL}/api/runs/${id}/rerun`, { method: 'POST' });
@@ -538,6 +810,7 @@ export const api = {
           slack_webhook_url: data.slack_webhook_url || '',
           admin_token: data.admin_token || '',
           auto_comment_duplicates: true,
+          automation_mode: data.automation_mode || 'semi_autonomous',
         };
       }
     } catch {
@@ -567,6 +840,7 @@ export const api = {
         dry_run: settings.dry_run,
         slack_webhook_url: settings.slack_webhook_url,
         admin_token: settings.admin_token,
+        automation_mode: settings.automation_mode,
       };
       const res = await fetch(`${BACKEND_URL}/api/settings`, {
         method: 'POST',
@@ -581,6 +855,7 @@ export const api = {
           fallback_assignee: data.fallback_assignee ?? settings.fallback_assignee,
           slack_webhook_url: data.slack_webhook_url ?? settings.slack_webhook_url,
           admin_token: data.admin_token ?? settings.admin_token,
+          automation_mode: data.automation_mode ?? settings.automation_mode,
         };
         if (typeof window !== 'undefined') {
           localStorage.setItem('ichnoscope_settings', JSON.stringify(updated));

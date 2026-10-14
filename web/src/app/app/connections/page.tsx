@@ -93,31 +93,39 @@ export default function ConnectionsPage() {
       </div>
 
       {/* Architecture Responsibility Box */}
-      <div className="p-5 rounded-lg border border-border-subtle bg-surface shadow-xs space-y-3">
+      <div className="p-5 rounded-lg border border-border-subtle bg-surface shadow-xs space-y-4">
         <div className="flex items-center justify-between border-b border-border-subtle pb-2.5">
-          <h3 className="text-caption font-semibold uppercase tracking-wider text-secondary flex items-center gap-1.5">
+          <h3 className="text-caption font-semibold uppercase tracking-wider text-secondary flex items-center gap-1.5 font-mono">
             <Zap className="w-4 h-4 text-warning" />
-            Deterministic vs LLM System Boundary
+            Server B Core Dual-Gate Architecture
           </h3>
-          <span className="text-caption text-text-muted font-mono">Principle 1: Code gathers evidence; LLM explains it</span>
+          <span className="text-caption text-text-muted font-mono">Internal Network / Core Orchestration</span>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-caption">
           <div className="p-3 rounded-md border border-border-subtle bg-canvas space-y-1">
-            <span className="font-mono font-semibold text-accent block">Sentry Gateway</span>
-            <p className="text-secondary text-caption">HMAC-SHA256 signature verification. Replies 200 immediately before running background triage.</p>
+            <span className="font-mono font-semibold text-amber-500 block">Stage 1: Staging Queue</span>
+            <p className="text-secondary text-caption">
+              Status <code className="font-mono text-amber-500">staged_raw</code> (Gate 1). Raw crashes staged first with zero AI tokens and zero git calls. Operator reviews or auto-dispatches.
+            </p>
           </div>
           <div className="p-3 rounded-md border border-border-subtle bg-canvas space-y-1">
-            <span className="font-mono font-semibold text-accent block">GraphQL Blame</span>
-            <p className="text-secondary text-caption">Blames deployed release SHA only. Prevents attributing errors to shifted lines from later commits.</p>
+            <span className="font-mono font-semibold text-purple-600 block">AI &amp; Git Orchestrator</span>
+            <p className="text-secondary text-caption">
+              Stack normalizer &rarr; SHA-256 dedupe &rarr; GraphQL blame at release SHA &rarr; LLM hypothesis &amp; 3-point checklist &rarr; Severity classifier.
+            </p>
           </div>
           <div className="p-3 rounded-md border border-border-subtle bg-canvas space-y-1">
-            <span className="font-mono font-semibold text-accent block">LLM Reasoning</span>
-            <p className="text-secondary text-caption">Outputs hypothesis, domain, and 3 verification checks. Never emits SHAs, usernames, or severity.</p>
+            <span className="font-mono font-semibold text-purple-400 block">Stage 2: Draft Staging</span>
+            <p className="text-secondary text-caption">
+              Status <code className="font-mono text-purple-400">staged_draft</code> (Gate 2). Interactive Markdown preview, custom title &amp; assignee editing, human sign-off.
+            </p>
           </div>
           <div className="p-3 rounded-md border border-border-subtle bg-canvas space-y-1">
-            <span className="font-mono font-semibold text-accent block">Human Authority</span>
-            <p className="text-secondary text-caption">Draft-and-approve gate ensures on-call engineers maintain final sign-off authority.</p>
+            <span className="font-mono font-semibold text-emerald-500 block">Dispatch Adapters</span>
+            <p className="text-secondary text-caption">
+              GitHub REST/GraphQL opens official issue with suspect commit diff. Slack webhook posts actionable incident card.
+            </p>
           </div>
         </div>
       </div>

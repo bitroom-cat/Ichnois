@@ -1,9 +1,9 @@
 """Persistence layer storing incident RunState records and pipeline execution logs."""
 
 import json
-import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 from ichnoscope.db import get_db, init_db
 from ichnoscope.models import RunState
@@ -23,22 +23,53 @@ def save_run(
     with get_db(db_path) as conn:
         cursor = conn.execute("SELECT created_at FROM runs WHERE id = ?;", (run_id,))
         row = cursor.fetchone()
+        raw_payload = json.dumps(state.payload)
         if row:
             conn.execute(
                 """
                 UPDATE runs
-                SET fingerprint = ?, status = ?, state_json = ?, updated_at = ?
+                SET fingerprint = ?, status = ?, severity = ?, is_regression = ?,
+                    issue_url = ?, draft_title = ?, draft_body = ?, raw_payload = ?,
+                    state_json = ?, updated_at = ?
                 WHERE id = ?;
                 """,
-                (state.fingerprint, state.status, state_json, ts, run_id),
+                (
+                    state.fingerprint,
+                    state.status,
+                    state.severity,
+                    1 if state.is_regression else 0,
+                    state.issue_url,
+                    state.draft_title_override,
+                    state.draft_body_override,
+                    raw_payload,
+                    state_json,
+                    ts,
+                    run_id,
+                ),
             )
         else:
             conn.execute(
                 """
-                INSERT INTO runs (id, fingerprint, status, state_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?);
+                INSERT INTO runs (
+                    id, fingerprint, status, severity, is_regression, issue_url,
+                    draft_title, draft_body, raw_payload, state_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                (run_id, state.fingerprint, state.status, state_json, ts, ts),
+                (
+                    run_id,
+                    state.fingerprint,
+                    state.status,
+                    state.severity,
+                    1 if state.is_regression else 0,
+                    state.issue_url,
+                    state.draft_title_override,
+                    state.draft_body_override,
+                    raw_payload,
+                    state_json,
+                    ts,
+                    ts,
+                ),
             )
 
 
@@ -68,18 +99,30 @@ def get_run(run_id: str, db_path: Path | str | None = None) -> RunState | None:
 def list_runs(
     db_path: Path | str | None = None,
     limit: int = 50,
+    status: str | None = None,
 ) -> list[tuple[str, RunState]]:
-    """List most recently updated runs up to limit."""
+    """List most recently updated runs up to limit, optionally filtered by status."""
     path = init_db(db_path)
     with get_db(db_path) as conn:
-        cursor = conn.execute(
-            """
-            SELECT id, state_json FROM runs
-            ORDER BY updated_at DESC
-            LIMIT ?;
-            """,
-            (limit,),
-        )
+        if status:
+            cursor = conn.execute(
+                """
+                SELECT id, state_json FROM runs
+                WHERE status = ?
+                ORDER BY updated_at DESC
+                LIMIT ?;
+                """,
+                (status, limit),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT id, state_json FROM runs
+                ORDER BY updated_at DESC
+                LIMIT ?;
+                """,
+                (limit,),
+            )
         results: list[tuple[str, RunState]] = []
         for r_id, raw_json in cursor.fetchall():
             try:
@@ -88,6 +131,164 @@ def list_runs(
             except Exception:  # noqa: BLE001, S112
                 continue
         return results
+
+
+def record_gate_review(
+    run_id: str,
+    gate: str,
+    action: str,
+    reviewer: str,
+    notes: str | None = None,
+    db_path: Path | str | None = None,
+    now: float | None = None,
+) -> None:
+    """Persist a Gate 1 or Gate 2 audit record."""
+    init_db(db_path)
+    ts = now if now is not None else time.time()
+    with get_db(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO gate_reviews (run_id, gate, action, reviewer, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            (run_id, gate, action, reviewer, notes, ts),
+        )
+
+
+def list_gate_reviews(
+    run_id: str,
+    db_path: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Return gate review history for a run."""
+    init_db(db_path)
+    with get_db(db_path) as conn:
+        cursor = conn.execute(
+            """
+            SELECT gate, action, reviewer, notes, created_at
+            FROM gate_reviews
+            WHERE run_id = ?
+            ORDER BY id ASC;
+            """,
+            (run_id,),
+        )
+        return [
+            {
+                "gate": row[0],
+                "action": row[1],
+                "reviewer": row[2],
+                "notes": row[3],
+                "created_at": row[4],
+            }
+            for row in cursor.fetchall()
+        ]
+
+
+def list_policies(db_path: Path | str | None = None) -> list[dict[str, Any]]:
+    """Return automation policies, newest first."""
+    init_db(db_path)
+    with get_db(db_path) as conn:
+        cursor = conn.execute(
+            """
+            SELECT id, name, is_active, rule_json, created_at, updated_at
+            FROM automation_policies
+            ORDER BY updated_at DESC;
+            """
+        )
+        items: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            try:
+                rule = json.loads(row[3]) if row[3] else {}
+            except json.JSONDecodeError:
+                rule = {}
+            items.append(
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "is_active": bool(row[2]),
+                    "rule": rule,
+                    "created_at": row[4],
+                    "updated_at": row[5],
+                }
+            )
+        return items
+
+
+def upsert_policy(
+    policy_id: str,
+    name: str,
+    rule: dict[str, Any],
+    *,
+    is_active: bool = True,
+    db_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Insert or replace an automation policy document."""
+    init_db(db_path)
+    ts = time.time()
+    rule_json = json.dumps(rule)
+    with get_db(db_path) as conn:
+        cursor = conn.execute("SELECT created_at FROM automation_policies WHERE id = ?;", (policy_id,))
+        row = cursor.fetchone()
+        created_at = row[0] if row else ts
+        if row:
+            conn.execute(
+                """
+                UPDATE automation_policies
+                SET name = ?, is_active = ?, rule_json = ?, updated_at = ?
+                WHERE id = ?;
+                """,
+                (name, 1 if is_active else 0, rule_json, ts, policy_id),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO automation_policies (id, name, is_active, rule_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?);
+                """,
+                (policy_id, name, 1 if is_active else 0, rule_json, created_at, ts),
+            )
+    return {
+        "id": policy_id,
+        "name": name,
+        "is_active": is_active,
+        "rule": rule,
+        "created_at": created_at,
+        "updated_at": ts,
+    }
+
+
+def ensure_default_policy(
+    default_mode: str = "semi_autonomous",
+    db_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Seed the organization default policy if none exist."""
+    policies = list_policies(db_path=db_path)
+    if policies:
+        return policies[0]
+    return upsert_policy(
+        "org-default",
+        "Organization Default",
+        {
+            "default_mode": default_mode,
+            "rules": [
+                {
+                    "name": "Production Critical Escalation",
+                    "condition": {"environment": "production", "severity": "P1-Critical"},
+                    "action": {"gate1": "auto_approve", "gate2": "auto_publish", "slack_alert": True},
+                },
+                {
+                    "name": "Staging Filter",
+                    "condition": {"environment": "staging"},
+                    "action": {"gate1": "require_manual", "gate2": "require_manual"},
+                },
+                {
+                    "name": "Noise Suppressor",
+                    "condition": {"exception_type": ["NotFoundHttpException", "ChunkLoadError"]},
+                    "action": {"gate1": "auto_dismiss"},
+                },
+            ],
+        },
+        db_path=db_path,
+    )
 
 
 def record_log(
