@@ -17,6 +17,17 @@
 </p>
 
 <p align="center">
+  <a href="https://ichnoscope-wcc-30.vercel.app/">
+    <img src="https://img.shields.io/badge/%F0%9F%9A%80%20LIVE%20DEMO-Open%20Ichnoscope-00b8d9?style=for-the-badge" alt="Live demo">
+  </a>
+  &nbsp;
+  <a href="https://www.youtube.com/watch?v=NsmXi0lnl7Y">
+    <img src="https://img.shields.io/badge/%E2%96%B6%20WATCH-Project%20Video-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="Watch the video">
+  </a>
+</p>
+
+<p align="center">
+  <a href="#-demo">Demo</a> &middot;
   <a href="#the-problem">Problem</a> &middot;
   <a href="#how-it-works">How it works</a> &middot;
   <a href="#architecture">Architecture</a> &middot;
@@ -24,6 +35,23 @@
   <a href="#getting-started">Getting started</a> &middot;
   <a href="#project-status">Status</a> &middot;
   <a href="#roadmap">Roadmap</a>
+</p>
+
+---
+
+## 🎬 Demo
+
+> ### 🚀 Live deployment: **[ichnoscope-wcc-30.vercel.app](https://ichnoscope-wcc-30.vercel.app/)**
+> ### 🚀 Demo website for trigering errors: **[https://ichnoscope-demo-we-app-1.onrender.com/](https://ichnoscope-demo-we-app-1.onrender.com/)**
+> 
+> ### ▶️ Video walkthrough: **[Watch on YouTube](https://www.youtube.com/watch?v=NsmXi0lnl7Y)**
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=NsmXi0lnl7Y">
+    <img src="https://img.youtube.com/vi/NsmXi0lnl7Y/maxresdefault.jpg" alt="Ichnoscope project explanation video" width="800">
+  </a>
+  <br>
+  <em>Click the thumbnail to watch the project explanation</em>
 </p>
 
 ---
@@ -267,7 +295,7 @@ without a token now raise instead of returning a clean error.
 
 ## Getting started
 
-> The repository is currently a documentation and scaffold state (see [Project status](#project-status)). The steps below describe the intended setup.
+> The repository is currently a documentation and scaffold state (see [Project status](#project-status)). The steps below describe the intended setup. To see the project in action right now, use the [live demo](https://ichnoscope-wcc-30.vercel.app/) or [watch the video](https://www.youtube.com/watch?v=NsmXi0lnl7Y).
 
 ```bash
 git clone https://github.com/<owner>/Ichnoscope-WCC-30.git

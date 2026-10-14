@@ -13,9 +13,19 @@ Validates all 8 perimeter guardrails:
 
 import json
 from fastapi.testclient import TestClient
+from pathlib import Path
+import sys
 
-from v2.edge_gateway.app import app
-from v2.edge_gateway.config import get_gateway_config
+_CURRENT_DIR = str(Path(__file__).resolve().parent)
+if _CURRENT_DIR not in sys.path:
+    sys.path.insert(0, _CURRENT_DIR)
+
+try:
+    from v2.edge_gateway.app import app, config as gateway_cfg, edge_ip_limiter
+    from v2.edge_gateway.config import get_gateway_config
+except ImportError:
+    from app import app, config as gateway_cfg, edge_ip_limiter
+    from config import get_gateway_config
 
 client = TestClient(app)
 config = get_gateway_config()
@@ -152,8 +162,6 @@ def test_layer7_and_layer8_valid_ingest_with_pii_scrubbing():
 
 def test_layer6_rate_limiter_throttle():
     """Verify Layer 6: Excessive burst requests trigger HTTP 429 and Retry-After header."""
-    from v2.edge_gateway.limiter import edge_ip_limiter
-
     # Exhaust the test client IP's bucket
     client_ip = "testclient"
     for _ in range(70):

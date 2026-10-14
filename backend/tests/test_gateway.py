@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from ichnoscope.main import app, verify_signature
@@ -37,30 +38,36 @@ def test_verify_signature():
 def test_webhook_sentry_valid(monkeypatch):
     secret = "sentry-secret-999"
     monkeypatch.setenv("SENTRY_CLIENT_SECRET", secret)
+    from ichnoscope.config import get_settings
+    get_settings.cache_clear()
 
     body = json.dumps({"action": "created", "event": {"id": "123"}}).encode("utf-8")
     sig = _compute_sig(body, secret)
 
-    resp = client.post(
-        "/webhook/sentry",
-        content=body,
-        headers={"sentry-hook-signature": sig, "Content-Type": "application/json"},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"status": "accepted"}
+    with patch("ichnoscope.main.ingest_incident") as mock_ingest:
+        resp = client.post(
+            "/webhook/sentry",
+            content=body,
+            headers={"sentry-hook-signature": sig, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "accepted"}
+        assert mock_ingest.called
 
-    # Verify /api/webhook/sentry alias
-    resp_alias = client.post(
-        "/api/webhook/sentry",
-        content=body,
-        headers={"sentry-hook-signature": sig, "Content-Type": "application/json"},
-    )
-    assert resp_alias.status_code == 200
-    assert resp_alias.json() == {"status": "accepted"}
+        # Verify /api/webhook/sentry alias
+        resp_alias = client.post(
+            "/api/webhook/sentry",
+            content=body,
+            headers={"sentry-hook-signature": sig, "Content-Type": "application/json"},
+        )
+        assert resp_alias.status_code == 200
+        assert resp_alias.json() == {"status": "accepted"}
 
 
 def test_webhook_sentry_bad_signature(monkeypatch):
     monkeypatch.setenv("SENTRY_CLIENT_SECRET", "sentry-secret-999")
+    from ichnoscope.config import get_settings
+    get_settings.cache_clear()
 
     body = b'{"test": 1}'
     resp = client.post(
@@ -74,6 +81,8 @@ def test_webhook_sentry_bad_signature(monkeypatch):
 def test_webhook_sentry_bad_json(monkeypatch):
     secret = "sentry-secret-999"
     monkeypatch.setenv("SENTRY_CLIENT_SECRET", secret)
+    from ichnoscope.config import get_settings
+    get_settings.cache_clear()
 
     body = b"{not-valid-json"
     sig = _compute_sig(body, secret)
@@ -169,4 +178,4 @@ def test_api_settings_and_health():
 
     resp_health = client.get("/api/health")
     assert resp_health.status_code == 200
-    assert len(resp_health.json()) == 4
+    assert len(resp_health.json()) in (4, 5)

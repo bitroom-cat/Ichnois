@@ -73,6 +73,9 @@ def publish_issue(
     previous_issue_number: int | None = None,
     settings: Settings | None = None,
     client: httpx.Client | None = None,
+    title_override: str | None = None,
+    body_override: str | None = None,
+    assignee_override: str | None = None,
 ) -> PublishResult:
     """Publish a drafted incident issue to GitHub, honoring dry_run mode."""
     if settings is None:
@@ -95,8 +98,14 @@ def publish_issue(
         is_regression=is_regression,
         previous_issue_number=previous_issue_number,
         repo=settings.github_repository,
-        fallback_assignee=settings.fallback_assignee,
+        fallback_assignee=assignee_override or settings.fallback_assignee,
     )
+    if title_override:
+        draft.title = title_override
+    if body_override:
+        draft.body = body_override
+    if assignee_override:
+        draft.suggested_owner = assignee_override
 
     # Dry run returns simulated response without network calls
     if settings.dry_run:

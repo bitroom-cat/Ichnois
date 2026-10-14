@@ -237,17 +237,43 @@ export function RegressionBadge({ isRegression, className }: { isRegression?: bo
 }
 
 export function RunStatusBadge({ status, className }: { status: any; className?: string }) {
-  // Gracefully handles both legacy and current run statuses
-  if (status === 'pending_approval' || status === 'draft_ready') {
+  // Gracefully handles Server B dual-gate and legacy run statuses
+  if (status === 'staged_raw') {
     return (
       <span
         className={cn(
-          'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-caption font-medium font-mono select-none bg-draft-subtle text-draft border border-draft/40 font-semibold',
+          'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-caption font-medium font-mono select-none bg-amber-500/10 text-amber-500 border border-amber-500/30 font-semibold',
           className
         )}
       >
-        <FileEdit className="w-3 h-3 text-draft" />
-        <span>Pending Review</span>
+        <Clock className="w-3 h-3 text-amber-500 animate-pulse" />
+        <span>Stage 1: Gate 1 Raw</span>
+      </span>
+    );
+  }
+  if (status === 'staged_draft' || status === 'pending_approval' || status === 'draft_ready') {
+    return (
+      <span
+        className={cn(
+          'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-caption font-medium font-mono select-none bg-purple-500/15 text-purple-400 border border-purple-500/40 font-semibold',
+          className
+        )}
+      >
+        <FileEdit className="w-3 h-3 text-purple-400" />
+        <span>Stage 2: Gate 2 Draft</span>
+      </span>
+    );
+  }
+  if (status === 'dismissed') {
+    return (
+      <span
+        className={cn(
+          'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-sm text-caption font-medium font-mono select-none bg-surface text-text-muted border border-border-subtle',
+          className
+        )}
+      >
+        <Slash className="w-3 h-3 text-text-muted" />
+        <span>Gate 1 Dismissed (0 Tokens)</span>
       </span>
     );
   }

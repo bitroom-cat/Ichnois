@@ -20,16 +20,26 @@ import {
   X,
   Radio,
   FileCode,
+  ShieldAlert,
+  ArrowRight,
+  Check,
+  Send,
+  Slash,
+  Sliders,
+  Cpu,
 } from 'lucide-react';
+import { RunStatusBadge, SeverityBadge } from '@/components/primitives/Badge';
 
 export default function RunsListPage() {
   const router = useRouter();
   const [runs, setRuns] = useState<RunItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'published' | 'rejected'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'gate1' | 'gate2' | 'published' | 'dismissed_rejected'>('all');
   const [replayModalOpen, setReplayModalOpen] = useState(false);
   const [replaying, setReplaying] = useState(false);
+  const [replayMode, setReplayMode] = useState<'auto' | 'gate1_manual'>('auto');
+  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
 
   const fetchRuns = async () => {
     setLoading(true);
@@ -49,6 +59,20 @@ export default function RunsListPage() {
     setReplaying(true);
     try {
       const newRun = await api.replaySavedFixture(fixture);
+      // If user selected manual Gate 1 staging simulation, drop it into staged_raw
+      if (replayMode === 'gate1_manual') {
+        const stagedRun = {
+          ...newRun,
+          status: 'staged_raw',
+          culprit: null,
+          explanation: null,
+        };
+        // update locally
+        setRuns((prev) => [stagedRun, ...prev.filter((r) => r.id !== newRun.id)]);
+        setReplayModalOpen(false);
+        router.push(`/app/runs/${newRun.id}`);
+        return;
+      }
       setReplayModalOpen(false);
       router.push(`/app/runs/${newRun.id}`);
     } finally {
@@ -56,35 +80,92 @@ export default function RunsListPage() {
     }
   };
 
-  const pendingRuns = runs.filter(
-    (r) => r.status === 'pending_approval' || r.status === 'draft_ready'
+  // Quick inline actions for Gate 1 and Gate 2
+  const handleGate1Approve = async (e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setActionLoadingId(id);
+    try {
+      const updated = await api.gate1Approve(id, { reviewer: 'operator', notes: 'Approved from Control Center queue' });
+      setRuns((prev) => prev.map((r) => (r.id === id ? updated : r)));
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleGate1Dismiss = async (e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setActionLoadingId(id);
+    try {
+      const updated = await api.gate1Dismiss(id, { reviewer: 'operator', reason: 'Dismissed as noise' });
+      setRuns((prev) => prev.map((r) => (r.id === id ? updated : r)));
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleGate2Approve = async (e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setActionLoadingId(id);
+    try {
+      const updated = await api.gate2Approve(id, { reviewer: 'operator', notes: 'Quick published from queue' });
+      setRuns((prev) => prev.map((r) => (r.id === id ? updated : r)));
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleGate2Reject = async (e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setActionLoadingId(id);
+    try {
+      const updated = await api.gate2Reject(id, { reviewer: 'operator', reason: 'Discarded by reviewer' });
+      setRuns((prev) => prev.map((r) => (r.id === id ? updated : r)));
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  // Bucket runs by Server B stages
+  const gate1Runs = runs.filter((r) => r.status === 'staged_raw' || r.status === 'received');
+  const gate2Runs = runs.filter(
+    (r) => r.status === 'staged_draft' || r.status === 'draft_ready' || r.status === 'pending_approval'
   );
-  const publishedRuns = runs.filter(
-    (r) => r.status === 'approved' || r.status === 'published'
-  );
-  const rejectedRuns = runs.filter((r) => r.status === 'rejected');
+  const publishedRuns = runs.filter((r) => r.status === 'approved' || r.status === 'published');
+  const dismissedOrRejectedRuns = runs.filter((r) => r.status === 'rejected' || r.status === 'dismissed');
 
   const filteredRuns = runs.filter((run) => {
     // Filter by tab
-    if (activeTab === 'pending' && run.status !== 'pending_approval' && run.status !== 'draft_ready') {
+    if (activeTab === 'gate1' && run.status !== 'staged_raw' && run.status !== 'received') {
+      return false;
+    }
+    if (
+      activeTab === 'gate2' &&
+      run.status !== 'staged_draft' &&
+      run.status !== 'draft_ready' &&
+      run.status !== 'pending_approval'
+    ) {
       return false;
     }
     if (activeTab === 'published' && run.status !== 'approved' && run.status !== 'published') {
       return false;
     }
-    if (activeTab === 'rejected' && run.status !== 'rejected') {
+    if (activeTab === 'dismissed_rejected' && run.status !== 'rejected' && run.status !== 'dismissed') {
       return false;
     }
 
     // Search query
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      const matchMsg = (run.culprit.message || '').toLowerCase().includes(q);
-      const matchErr = run.incident.error_message.toLowerCase().includes(q);
-      const matchType = run.incident.exception_type.toLowerCase().includes(q);
-      const matchSha = run.culprit.sha.toLowerCase().includes(q);
-      const matchAuthor = run.culprit.author_login.toLowerCase().includes(q);
-      const matchFile = run.incident.file_path.toLowerCase().includes(q);
+      const matchMsg = (run.culprit?.message || '').toLowerCase().includes(q);
+      const matchErr = (run.incident?.error_message || '').toLowerCase().includes(q);
+      const matchType = (run.incident?.exception_type || '').toLowerCase().includes(q);
+      const matchSha = (run.culprit?.sha || '').toLowerCase().includes(q);
+      const matchAuthor = (run.culprit?.author_login || '').toLowerCase().includes(q);
+      const matchFile = (run.incident?.file_path || '').toLowerCase().includes(q);
       if (!matchMsg && !matchErr && !matchType && !matchSha && !matchAuthor && !matchFile) {
         return false;
       }
@@ -94,29 +175,54 @@ export default function RunsListPage() {
 
   return (
     <div className="space-y-5 animate-in fade-in duration-200">
-      {/* Top Banner (Render Style) */}
-      <div className="flex items-center justify-between p-3 rounded-lg bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/40 text-xs text-purple-900 dark:text-purple-200">
-        <div className="flex items-center gap-2 min-w-0">
-          <Info className="w-4 h-4 text-purple-600 shrink-0" />
-          <span className="truncate">
-            Production listener active on <code className="font-mono font-medium">/webhook/sentry</code>.
-            Correlating runtime exceptions with Git blame at release SHA.
-          </span>
+      {/* Server B Core Dual-Gate Architecture Infographic Bar */}
+      <div className="rounded-xl border border-purple-200 dark:border-purple-800/40 bg-gradient-to-r from-purple-500/5 via-surface to-accent/5 p-4 text-xs">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-purple-600 text-white">
+                Server B: Core Orchestrator
+              </span>
+              <span className="text-text-muted">•</span>
+              <span className="text-text-secondary font-medium">Dual-Gated Autonomous Triage Pipeline</span>
+            </div>
+            <p className="text-text-muted text-[11px] leading-relaxed">
+              Stage 1 holds raw Sentry telemetry in <code className="font-mono text-purple-600 font-semibold">staged_raw</code> (zero AI tokens).
+              Auto-dispatch or human sign-off triggers AI blame correlator. Stage 2 prepares draft for GitHub &amp; Slack push.
+            </p>
+          </div>
+
+          {/* Quick Flow Chips */}
+          <div className="flex items-center gap-1.5 flex-wrap font-mono text-[11px]">
+            <span className="px-2 py-1 rounded bg-canvas border border-border-subtle flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-amber-500" />
+              <span>Gate 1: Ingest</span>
+            </span>
+            <ArrowRight className="w-3 h-3 text-text-muted" />
+            <span className="px-2 py-1 rounded bg-canvas border border-border-subtle flex items-center gap-1">
+              <Cpu className="w-3 h-3 text-purple-600" />
+              <span>AI &amp; Blame</span>
+            </span>
+            <ArrowRight className="w-3 h-3 text-text-muted" />
+            <span className="px-2 py-1 rounded bg-canvas border border-border-subtle flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-purple-500" />
+              <span>Gate 2: Draft</span>
+            </span>
+            <ArrowRight className="w-3 h-3 text-text-muted" />
+            <span className="px-2 py-1 rounded bg-canvas border border-border-subtle flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span>GitHub / Slack</span>
+            </span>
+          </div>
         </div>
-        <Link
-          href="/app/connections"
-          className="font-semibold text-purple-700 dark:text-purple-300 hover:underline shrink-0 ml-3"
-        >
-          View health
-        </Link>
       </div>
 
       {/* Page Header (Render Style) */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-text-primary tracking-tight">Deploys</h1>
+          <h1 className="text-xl font-bold text-text-primary tracking-tight">Deploys &amp; Incident Triage</h1>
           <p className="text-xs text-text-muted mt-0.5">
-            Deployment history, Sentry regression alerts, and human-in-the-loop triage decisions.
+            Stage 1 raw crashes, AI &amp; blame synthesis pipeline, Gate 2 interactive draft review, and external dispatches.
           </p>
         </div>
 
@@ -152,24 +258,40 @@ export default function RunsListPage() {
                 : 'border-transparent text-text-secondary hover:text-text-primary'
             }`}
           >
-            <span>All Deploys</span>
+            <span>All Incidents</span>
             <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-canvas border border-border-subtle text-text-muted">
               {runs.length}
             </span>
           </button>
 
           <button
-            onClick={() => setActiveTab('pending')}
+            onClick={() => setActiveTab('gate1')}
             className={`px-3 py-2 border-b-2 font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${
-              activeTab === 'pending'
+              activeTab === 'gate1'
                 ? 'border-purple-600 text-purple-600 dark:text-purple-400 font-semibold'
                 : 'border-transparent text-text-secondary hover:text-text-primary'
             }`}
           >
-            <span>Pending Review</span>
-            {pendingRuns.length > 0 && (
+            <span>Gate 1: Ingest Queue</span>
+            {gate1Runs.length > 0 && (
               <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-semibold">
-                {pendingRuns.length}
+                {gate1Runs.length}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('gate2')}
+            className={`px-3 py-2 border-b-2 font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+              activeTab === 'gate2'
+                ? 'border-purple-600 text-purple-600 dark:text-purple-400 font-semibold'
+                : 'border-transparent text-text-secondary hover:text-text-primary'
+            }`}
+          >
+            <span>Gate 2: Draft Queue</span>
+            {gate2Runs.length > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 font-semibold">
+                {gate2Runs.length}
               </span>
             )}
           </button>
@@ -182,23 +304,23 @@ export default function RunsListPage() {
                 : 'border-transparent text-text-secondary hover:text-text-primary'
             }`}
           >
-            <span>Live / Published</span>
+            <span>Published</span>
             <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-canvas border border-border-subtle text-text-muted">
               {publishedRuns.length}
             </span>
           </button>
 
           <button
-            onClick={() => setActiveTab('rejected')}
+            onClick={() => setActiveTab('dismissed_rejected')}
             className={`px-3 py-2 border-b-2 font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap ${
-              activeTab === 'rejected'
+              activeTab === 'dismissed_rejected'
                 ? 'border-purple-600 text-purple-600 dark:text-purple-400 font-semibold'
                 : 'border-transparent text-text-secondary hover:text-text-primary'
             }`}
           >
-            <span>Discarded</span>
+            <span>Dismissed / Rejected</span>
             <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-canvas border border-border-subtle text-text-muted">
-              {rejectedRuns.length}
+              {dismissedOrRejectedRuns.length}
             </span>
           </button>
         </div>
@@ -229,9 +351,9 @@ export default function RunsListPage() {
               <Sparkles className="w-5 h-5" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-text-primary">No deploys match this filter</p>
+              <p className="text-sm font-semibold text-text-primary">No incidents match this filter</p>
               <p className="text-xs text-text-muted mt-1">
-                Try clearing the search query or triggering a Sentry incident webhook.
+                Try triggering a Sentry incident webhook or switching filters.
               </p>
             </div>
             <button
@@ -244,42 +366,53 @@ export default function RunsListPage() {
           </div>
         ) : (
           filteredRuns.map((run) => {
-            const shortSha = run.culprit.sha ? run.culprit.sha.slice(0, 7) : '53f7103';
+            const shortSha = run.culprit?.sha ? run.culprit.sha.slice(0, 7) : 'pending';
+            const isGate1 = run.status === 'staged_raw' || run.status === 'received';
+            const isGate2 = run.status === 'staged_draft' || run.status === 'draft_ready' || run.status === 'pending_approval';
             const isApproved = run.status === 'approved' || run.status === 'published';
-            const isPending = run.status === 'pending_approval' || run.status === 'draft_ready';
+            const isDismissed = run.status === 'dismissed';
             const isRejected = run.status === 'rejected';
-            const displayTitle = run.culprit.message || `${run.incident.exception_type}: ${run.incident.error_message}`;
-            const triageDurationSec = (run.metrics.time_to_triage_ms / 1000).toFixed(1);
+            const displayTitle =
+              run.draft_title ||
+              run.culprit?.message ||
+              `${run.incident?.exception_type || 'Error'}: ${run.incident?.error_message || ''}`;
+            const triageDurationSec = ((run.metrics?.time_to_triage_ms || 1200) / 1000).toFixed(1);
 
             return (
-              <Link
+              <div
                 key={run.id}
-                href={`/app/runs/${run.id}`}
                 className="group block p-4 rounded-lg border border-border-subtle bg-surface hover:border-purple-400 dark:hover:border-purple-600/70 transition-all hover:shadow-xs"
               >
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                  {/* Left Column: Status Icon & Commit / Incident Details */}
-                  <div className="flex items-start gap-3 min-w-0 flex-1">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                  {/* Left Column: Status Icon & Details */}
+                  <Link href={`/app/runs/${run.id}`} className="flex items-start gap-3 min-w-0 flex-1">
                     {/* Status Dot / Indicator */}
                     <div className="mt-0.5 shrink-0">
                       {isApproved ? (
                         <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                      ) : isRejected ? (
-                        <XCircle className="w-4 h-4 text-rose-500" />
-                      ) : (
+                      ) : isDismissed || isRejected ? (
+                        <XCircle className="w-4 h-4 text-text-muted" />
+                      ) : isGate1 ? (
                         <span className="relative flex h-3.5 w-3.5 mt-0.5">
                           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
                           <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-amber-500" />
+                        </span>
+                      ) : (
+                        <span className="relative flex h-3.5 w-3.5 mt-0.5">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
+                          <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-purple-600" />
                         </span>
                       )}
                     </div>
 
                     {/* Commit & Metadata */}
                     <div className="space-y-1 min-w-0">
-                      <div className="flex flex-wrap items-baseline gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs font-semibold text-text-primary group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors truncate">
                           {displayTitle}
                         </span>
+                        <RunStatusBadge status={run.status} />
+                        <SeverityBadge severity={run.severity} />
                         {run.is_regression && (
                           <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 shrink-0">
                             Regression
@@ -287,100 +420,122 @@ export default function RunsListPage() {
                         )}
                       </div>
 
-                      {/* Sub-line metadata (Render style) */}
-                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-muted">
-                        {/* Status Label */}
-                        <span className="font-medium text-text-secondary">
-                          {isApproved ? (
-                            <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Deploy succeeded | Live</span>
-                          ) : isRejected ? (
-                            <span className="text-rose-600 dark:text-rose-400">Discarded</span>
-                          ) : (
-                            <span className="text-amber-600 dark:text-amber-400 font-semibold">Awaiting sign-off</span>
-                          )}
-                        </span>
+                      {/* Sub-line metadata */}
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-muted font-mono">
+                        {/* Failing line */}
+                        {run.incident?.file_path && (
+                          <>
+                            <span className="text-purple-600 dark:text-purple-400 font-medium">
+                              {run.incident.file_path}:{run.incident.line_number}
+                            </span>
+                            <span>•</span>
+                          </>
+                        )}
 
-                        <span>•</span>
-
-                        {/* Commit SHA Pill */}
-                        <span className="inline-flex items-center gap-1 font-mono text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-950/30 px-1.5 py-0.5 rounded">
-                          <GitCommit className="w-3 h-3" />
-                          {shortSha}
-                        </span>
-
-                        <span>•</span>
-
-                        {/* Branch */}
-                        <span className="font-mono text-text-secondary">
-                          production
-                        </span>
-
-                        <span>•</span>
+                        {/* Commit SHA */}
+                        {run.culprit?.sha && (
+                          <>
+                            <span className="inline-flex items-center gap-1 text-text-secondary bg-canvas px-1.5 py-0.5 rounded border border-border-subtle">
+                              <GitCommit className="w-3 h-3" />
+                              {shortSha}
+                            </span>
+                            <span>•</span>
+                          </>
+                        )}
 
                         {/* Author */}
-                        <span>
-                          @{run.culprit.author_login}
-                        </span>
-
+                        <span>@{run.custom_assignee || run.culprit?.author_login || 'octocat'}</span>
                         <span>•</span>
 
-                        {/* Trigger */}
-                        <span>
-                          Auto-Deploy (Sentry)
-                        </span>
-
+                        {/* Env */}
+                        <span className="text-emerald-600 font-medium">{run.incident?.environment || 'production'}</span>
                         <span>•</span>
 
-                        {/* Date */}
+                        {/* Impact */}
                         <span>
-                          {new Date(run.incident.first_seen || run.created_at).toLocaleString([], {
-                            month: 'short',
-                            day: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
+                          {run.incident?.users_affected || 0} users ({run.incident?.event_count || 1} events)
                         </span>
                       </div>
                     </div>
-                  </div>
+                  </Link>
 
-                  {/* Right Column: Duration, Action & Chevron */}
-                  <div className="flex items-center justify-between md:justify-end gap-3 shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-border-subtle text-xs">
-                    {/* Triage Speed */}
-                    <div className="text-right hidden sm:block">
-                      <div className="font-mono text-xs text-text-primary font-medium">
-                        {triageDurationSec}s
+                  {/* Right Column: Server B Gate Action Buttons */}
+                  <div className="flex items-center justify-between lg:justify-end gap-2 shrink-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-border-subtle text-xs">
+                    {/* Gate 1 Quick Actions: [Approve for AI] or [Dismiss/Spam] */}
+                    {isGate1 && (
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={(e) => handleGate1Dismiss(e, run.id)}
+                          disabled={actionLoadingId === run.id}
+                          className="px-2.5 py-1 rounded border border-border-subtle bg-surface hover:bg-hover text-text-muted hover:text-text-primary text-[11px] font-medium transition-colors"
+                          title="Dismiss as spam/noise (zero AI tokens)"
+                        >
+                          Dismiss (Noise)
+                        </button>
+                        <button
+                          onClick={(e) => handleGate1Approve(e, run.id)}
+                          disabled={actionLoadingId === run.id}
+                          className="flex items-center gap-1 px-3 py-1 rounded bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-semibold shadow-xs transition-colors"
+                        >
+                          <Sparkles className="w-3 h-3" />
+                          <span>Approve for AI</span>
+                        </button>
                       </div>
-                      <div className="text-[10px] text-text-muted font-mono">
-                        {run.incident.users_affected} users
-                      </div>
-                    </div>
-
-                    {/* Quick Button / Pill */}
-                    {isPending ? (
-                      <span className="px-2.5 py-1 rounded bg-purple-600 hover:bg-purple-700 text-white font-medium text-xs shadow-xs transition-colors flex items-center gap-1">
-                        Review & Sign-off
-                      </span>
-                    ) : isApproved ? (
-                      <span className="px-2 py-0.5 rounded border border-emerald-500/40 text-emerald-600 dark:text-emerald-400 text-xs font-medium">
-                        Live Issue
-                      </span>
-                    ) : (
-                      <span className="text-text-muted text-xs">
-                        Archived
-                      </span>
                     )}
 
-                    <ChevronRight className="w-4 h-4 text-text-muted group-hover:text-purple-600 group-hover:translate-x-0.5 transition-all" />
+                    {/* Gate 2 Quick Actions: [Approve & Publish] or [Reject] */}
+                    {isGate2 && (
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={(e) => handleGate2Reject(e, run.id)}
+                          disabled={actionLoadingId === run.id}
+                          className="px-2.5 py-1 rounded border border-border-subtle bg-surface hover:bg-rose-50 dark:hover:bg-rose-950/30 text-rose-600 text-[11px] font-medium transition-colors"
+                          title="Discard draft"
+                        >
+                          Reject
+                        </button>
+                        <button
+                          onClick={(e) => handleGate2Approve(e, run.id)}
+                          disabled={actionLoadingId === run.id}
+                          className="flex items-center gap-1 px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold shadow-xs transition-colors"
+                        >
+                          <Send className="w-3 h-3" />
+                          <span>Approve &amp; Publish</span>
+                        </button>
+                        <Link
+                          href={`/app/runs/${run.id}`}
+                          className="px-2.5 py-1 rounded border border-purple-300 dark:border-purple-700/60 text-purple-600 dark:text-purple-400 text-[11px] font-medium hover:bg-purple-50 dark:hover:bg-purple-950/30 transition-colors"
+                        >
+                          Review Draft
+                        </Link>
+                      </div>
+                    )}
+
+                    {/* Published Link */}
+                    {isApproved && run.issue_url && (
+                      <a
+                        href={run.issue_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-emerald-500/40 text-emerald-600 dark:text-emerald-400 text-[11px] font-medium hover:bg-emerald-50 dark:hover:bg-emerald-950/30 transition-colors"
+                      >
+                        <span>GitHub Issue</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
+
+                    <Link href={`/app/runs/${run.id}`} className="p-1 text-text-muted hover:text-purple-600">
+                      <ChevronRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                    </Link>
                   </div>
                 </div>
-              </Link>
+              </div>
             );
           })
         )}
       </div>
 
-      {/* Quick Sentry Webhook Simulation Modal */}
+      {/* Sentry Webhook Simulation Modal */}
       {replayModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in">
           <div className="w-full max-w-md rounded-xl border border-border-subtle bg-surface p-5 shadow-popover space-y-4">
@@ -390,8 +545,8 @@ export default function RunsListPage() {
                   <Play className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-semibold text-sm text-text-primary">Trigger Webhook Simulation</h3>
-                  <p className="text-[11px] text-text-muted">Replay an incident payload to test automated triage</p>
+                  <h3 className="font-semibold text-sm text-text-primary">Trigger Ingestion Webhook</h3>
+                  <p className="text-[11px] text-text-muted">Simulate Sentry error event arrival at Gate 1</p>
                 </div>
               </div>
               <button
@@ -400,6 +555,37 @@ export default function RunsListPage() {
               >
                 <X className="w-4 h-4" />
               </button>
+            </div>
+
+            {/* Ingestion Mode Choice */}
+            <div className="space-y-1.5 p-3 rounded-lg bg-canvas border border-border-subtle text-xs">
+              <span className="font-semibold text-text-primary block">Ingestion Mode:</span>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setReplayMode('auto')}
+                  className={`p-2 rounded border text-left transition-colors ${
+                    replayMode === 'auto'
+                      ? 'border-purple-600 bg-purple-50 dark:bg-purple-950/40 text-purple-600 font-semibold'
+                      : 'border-border-subtle text-text-secondary hover:bg-surface'
+                  }`}
+                >
+                  <div className="font-medium">Auto-Dispatch</div>
+                  <div className="text-[10px] text-text-muted">Advances to AI pipeline</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReplayMode('gate1_manual')}
+                  className={`p-2 rounded border text-left transition-colors ${
+                    replayMode === 'gate1_manual'
+                      ? 'border-amber-500 bg-amber-50 dark:bg-amber-950/40 text-amber-600 font-semibold'
+                      : 'border-border-subtle text-text-secondary hover:bg-surface'
+                  }`}
+                >
+                  <div className="font-medium">Gate 1 Manual</div>
+                  <div className="text-[10px] text-text-muted">Holds in staged_raw</div>
+                </button>
+              </div>
             </div>
 
             <div className="space-y-2 pt-1 text-xs">
@@ -416,7 +602,7 @@ export default function RunsListPage() {
                     KeyError: stripe_customer_id in payment_gateway.py
                   </div>
                   <div className="text-[10px] text-purple-600 dark:text-purple-400 font-mono">
-                    Suspect: 53f7103 • P1-Critical
+                    Suspect: d3e5f60 • P1-Critical
                   </div>
                 </div>
                 <ChevronRight className="w-4 h-4 text-text-muted group-hover:text-purple-600 mt-1" />
@@ -454,7 +640,7 @@ export default function RunsListPage() {
                     RuntimeError in urllib3 connection pool
                   </div>
                   <div className="text-[10px] text-purple-600 dark:text-purple-400 font-mono">
-                    In-app frame detection heuristic
+                    In-app frame detection heuristic • P3-Medium
                   </div>
                 </div>
                 <ChevronRight className="w-4 h-4 text-text-muted group-hover:text-purple-600 mt-1" />
@@ -463,7 +649,7 @@ export default function RunsListPage() {
 
             {replaying && (
               <div className="text-center text-xs text-purple-600 dark:text-purple-400 font-medium py-1 animate-pulse">
-                Synthesizing triage with LLM...
+                Staging incident into Server B queue...
               </div>
             )}
           </div>

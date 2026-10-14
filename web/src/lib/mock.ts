@@ -75,6 +75,10 @@ export interface RunDetail extends RunSummary {
   culprit: Culprit | null;
   explanation: Explanation | null;
   draftMarkdown: string;
+  draft_title?: string;
+  draft_body?: string;
+  custom_assignee?: string;
+  gate_reviews?: any[];
   logs: LogEntry[];
   steps: PipelineStep[];
 }

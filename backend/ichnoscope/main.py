@@ -8,16 +8,16 @@ import logging
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from ichnoscope.api import router as api_router
+from ichnoscope.api import router as api_router, serialize_run
 from ichnoscope.config import get_settings
-from ichnoscope.pipeline import run_pipeline
+from ichnoscope.pipeline import ingest_incident, run_pipeline
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Ichnoscope Incident Triage Gateway",
-    description="Autonomous incident triage correlating production crashes with git history.",
-    version="2.0.0",
+    title="Ichnoscope Server B — Core Orchestration",
+    description="Dual-gated incident triage: staging, AI/git orchestration, and dispatch.",
+    version="2.1.0",
 )
 
 app.add_middleware(
@@ -73,6 +73,41 @@ async def sentry_webhook(
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
 
-    # Enqueue background task and reply 200 immediately
-    bg.add_task(run_pipeline, payload)
+    # Enqueue background task and reply 200 immediately (Stage 1 ingestion & dispatch)
+    bg.add_task(ingest_incident, payload)
     return {"status": "accepted"}
+
+
+@app.post("/internal/v1/incidents/ingress")
+async def server_a_internal_ingress(
+    request: Request,
+    bg: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    """Internal ingress endpoint for Server A (Edge Gateway) sanitized incidents."""
+    settings = get_settings()
+    expected_secret = (
+        settings.internal_gateway_secret.get_secret_value()
+        if settings.internal_gateway_secret
+        else "ichnoscope-internal-gateway-token-v2"
+    )
+    if authorization:
+        token = authorization.replace("Bearer ", "").strip()
+        if token != expected_secret:
+            logger.warning("Unauthorized internal ingress attempt with token: %s", token[:6] + "...")
+            raise HTTPException(status_code=401, detail="Invalid internal gateway token")
+
+    try:
+        envelope = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON envelope") from exc
+
+    # Extract the sanitized telemetry event payload and metadata
+    payload = envelope.get("sanitized_payload", envelope)
+    project_id = envelope.get("project_id")
+    environment = envelope.get("environment")
+
+    # Forward directly to Stage 1 Ingestion Staging Queue (Gate 1)
+    bg.add_task(ingest_incident, payload, project_id=project_id, environment=environment)
+    return {"status": "staged_at_server_b", "gate": "gate_1_staging"}
+

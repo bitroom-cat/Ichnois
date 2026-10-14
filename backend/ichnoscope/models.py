@@ -10,15 +10,23 @@ Severity = Literal["P1-Critical", "P2-High", "P3-Medium"]
 Confidence = Literal["high", "low"]
 RunStatus = Literal[
     "received",
+    "staged_raw",
+    "dismissed",
+    "analyzing",
     "parsing",
     "blaming",
     "explaining",
+    "staged_draft",
     "draft_ready",
     "published",
     "rejected",
     "failed",
     "suppressed",
 ]
+
+AutomationMode = Literal["full_manual", "semi_autonomous", "fully_autonomous"]
+GateName = Literal["gate1", "gate2"]
+GateAction = Literal["approve", "dismiss", "reject", "auto_promoted"]
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -131,6 +139,20 @@ class Explanation(BaseModel):
         return cleaned
 
 
+class GateApproval(BaseModel):
+    """Human or policy decision recorded at Gate 1 (ingest) or Gate 2 (publish)."""
+
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    reason: str | None = None
+    action: GateAction | None = None
+
+    @field_validator("approved_at", mode="after")
+    @classmethod
+    def validate_approved_at(cls, v: datetime | None) -> datetime | None:
+        return _ensure_utc(v) if v is not None else None
+
+
 class RunState(BaseModel):
     """Pipeline execution state tracking an incident run from receipt to GitHub issue draft; built by code."""
 
@@ -141,14 +163,33 @@ class RunState(BaseModel):
     culprit: Culprit | None = None
     explanation: Explanation | None = None
     severity: Severity | None = None
-    status: RunStatus = "received"
+    status: RunStatus = "staged_raw"
     issue_url: str | None = None
     logs: list[str] = Field(default_factory=list)
+    project_id: str | None = None
+    environment: str | None = None
+    gate1_review: GateApproval | None = None
+    gate2_review: GateApproval | None = None
+    draft_title_override: str | None = None
+    draft_body_override: str | None = None
+    custom_assignee: str | None = None
 
     def add_log(self, message: str) -> None:
         """Append an audit log line with current UTC timestamp formatted as 'HH:MM:SS message'."""
         now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
         self.logs.append(f"{now_str} {message}")
+
+    @property
+    def is_gate1_pending(self) -> bool:
+        return self.status in {"staged_raw", "received"}
+
+    @property
+    def is_gate2_pending(self) -> bool:
+        return self.status in {"staged_draft", "draft_ready"}
+
+    @property
+    def is_analyzing(self) -> bool:
+        return self.status in {"analyzing", "parsing", "blaming", "explaining"}
 
 
 def explanation_json_schema() -> dict:

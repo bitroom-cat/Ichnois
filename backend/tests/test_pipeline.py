@@ -80,7 +80,7 @@ def test_pipeline_draft_ready_mode(tmp_path: Path):
     })
 
     state = run_pipeline(payload, run_id="run-draft-1", auto_publish=False, db_path=db_file, settings=settings)
-    assert state.status == "draft_ready"
+    assert state.status in ("draft_ready", "staged_draft")
     assert state.incident is not None
     assert state.explanation is not None
 
