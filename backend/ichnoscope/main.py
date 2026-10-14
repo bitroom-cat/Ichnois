@@ -85,7 +85,12 @@ async def server_a_internal_ingress(
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
     """Internal ingress endpoint for Server A (Edge Gateway) sanitized incidents."""
-    expected_secret = "ichnoscope-internal-gateway-token-v2"
+    settings = get_settings()
+    expected_secret = (
+        settings.internal_gateway_secret.get_secret_value()
+        if settings.internal_gateway_secret
+        else "ichnoscope-internal-gateway-token-v2"
+    )
     if authorization:
         token = authorization.replace("Bearer ", "").strip()
         if token != expected_secret:
@@ -97,9 +102,12 @@ async def server_a_internal_ingress(
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON envelope") from exc
 
-    # Extract the sanitized telemetry event payload
+    # Extract the sanitized telemetry event payload and metadata
     payload = envelope.get("sanitized_payload", envelope)
+    project_id = envelope.get("project_id")
+    environment = envelope.get("environment")
+
     # Forward directly to Stage 1 Ingestion Staging Queue (Gate 1)
-    bg.add_task(ingest_incident, payload)
+    bg.add_task(ingest_incident, payload, project_id=project_id, environment=environment)
     return {"status": "staged_at_server_b", "gate": "gate_1_staging"}
 
