@@ -34,3 +34,42 @@ services:
         sync: false
       - key: SLACK_WEBHOOK_URL
         sync: false
+      - key: INTERNAL_GATEWAY_SECRET
+        value: ichnoscope-internal-gateway-token-v2
+      - key: AUTOMATION_MODE
+        value: semi_autonomous
+
+  # Server A: Standalone Ingestion Gateway (v2 Edge Sensor)
+  - type: web
+    name: ichnoscope-edge-gateway
+    runtime: python
+    region: oregon
+    plan: free
+    rootDir: v2/edge_gateway
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: INTERNAL_CORE_URL
+        value: https://ichnoscope-backend.onrender.com/internal/v1/incidents/ingress
+      - key: INTERNAL_GATEWAY_SECRET
+        value: ichnoscope-internal-gateway-token-v2
+      - key: EDGE_ALLOWED_PROJECT_KEYS
+        value: sentry_public_key,demo_key,prod_client_key
+      - key: EDGE_ENFORCE_AUTH_WHITELIST
+        value: "false"
+      - key: EDGE_ALLOWED_ORIGINS
+        value: "*"
+      - key: MAX_BODY_BYTES
+        value: "51200"
+      - key: READ_TIMEOUT_SECONDS
+        value: "2.5"
+      - key: MAX_JSON_DEPTH
+        value: "10"
+      - key: IP_RATE_LIMIT_PER_MIN
+        value: "60"
+      - key: PROJECT_RATE_LIMIT_PER_MIN
+        value: "120"
+
