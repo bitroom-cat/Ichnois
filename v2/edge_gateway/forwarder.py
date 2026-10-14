@@ -4,7 +4,17 @@ import logging
 import time
 import httpx
 
-from v2.edge_gateway.config import get_gateway_config
+from pathlib import Path
+import sys
+
+_CURRENT_DIR = str(Path(__file__).resolve().parent)
+if _CURRENT_DIR not in sys.path:
+    sys.path.insert(0, _CURRENT_DIR)
+
+try:
+    from v2.edge_gateway.config import get_gateway_config
+except ImportError:
+    from config import get_gateway_config
 
 logger = logging.getLogger("edge_gateway.forwarder")
 

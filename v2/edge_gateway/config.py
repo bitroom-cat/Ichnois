@@ -9,7 +9,7 @@ class GatewayConfig(BaseModel):
 
     # Server Bindings
     host: str = Field(default_factory=lambda: os.getenv("EDGE_GATEWAY_HOST", "0.0.0.0"))
-    port: int = Field(default_factory=lambda: int(os.getenv("EDGE_GATEWAY_PORT", "8001")))
+    port: int = Field(default_factory=lambda: int(os.getenv("PORT", os.getenv("EDGE_GATEWAY_PORT", "8080"))))
     
     # 1. Origin Whitelisting & CORS
     allowed_origins: list[str] = Field(

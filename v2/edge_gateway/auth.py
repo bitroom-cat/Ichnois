@@ -5,8 +5,18 @@ and DSN query string parameters.
 """
 
 from fastapi import Request
+from pathlib import Path
+import sys
 
-from v2.edge_gateway.config import get_gateway_config
+# Ensure local directory is in path when run standalone
+_CURRENT_DIR = str(Path(__file__).resolve().parent)
+if _CURRENT_DIR not in sys.path:
+    sys.path.insert(0, _CURRENT_DIR)
+
+try:
+    from v2.edge_gateway.config import get_gateway_config
+except ImportError:
+    from config import get_gateway_config
 
 
 class AuthenticationError(Exception):

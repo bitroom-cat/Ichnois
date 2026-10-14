@@ -19,13 +19,27 @@ from collections.abc import Callable
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from pathlib import Path
+import sys
 
-from v2.edge_gateway.auth import AuthenticationError, authenticate_project_request
-from v2.edge_gateway.config import get_gateway_config
-from v2.edge_gateway.forwarder import forward_to_server_b
-from v2.edge_gateway.limiter import edge_ip_limiter, edge_project_limiter
-from v2.edge_gateway.redact import scrub_pii_and_secrets
-from v2.edge_gateway.security import SecurityPerimeterViolation, inspect_payload
+_CURRENT_DIR = str(Path(__file__).resolve().parent)
+if _CURRENT_DIR not in sys.path:
+    sys.path.insert(0, _CURRENT_DIR)
+
+try:
+    from v2.edge_gateway.auth import AuthenticationError, authenticate_project_request
+    from v2.edge_gateway.config import get_gateway_config
+    from v2.edge_gateway.forwarder import forward_to_server_b
+    from v2.edge_gateway.limiter import edge_ip_limiter, edge_project_limiter
+    from v2.edge_gateway.redact import scrub_pii_and_secrets
+    from v2.edge_gateway.security import SecurityPerimeterViolation, inspect_payload
+except ImportError:
+    from auth import AuthenticationError, authenticate_project_request
+    from config import get_gateway_config
+    from forwarder import forward_to_server_b
+    from limiter import edge_ip_limiter, edge_project_limiter
+    from redact import scrub_pii_and_secrets
+    from security import SecurityPerimeterViolation, inspect_payload
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [Server-A-Edge] %(message)s")
 logger = logging.getLogger("edge_gateway")
@@ -130,7 +144,10 @@ def metrics() -> dict[str, object]:
 
 
 from fastapi.responses import HTMLResponse
-from v2.edge_gateway.status_page import HTML_TEMPLATE
+try:
+    from v2.edge_gateway.status_page import HTML_TEMPLATE
+except ImportError:
+    from status_page import HTML_TEMPLATE
 
 
 @app.get("/", response_class=HTMLResponse)
