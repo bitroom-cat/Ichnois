@@ -1,1 +1,112 @@
-%% Purpose: Architecture diagram for the Ichnoscope dashboard and backend.
+flowchart TD
+    %% ===== Client Sensor Layer =====
+    subgraph CLIENT["Client Application (Universal Sensor)"]
+        APP["App Runtime (Web / Node / Python)"]
+        SDK["GlitchTip / Sentry-Compatible SDK<br/>tracesSampleRate: 0<br/>beforeSend noise filter<br/>Scope tags: env, release SHA"]
+        APP -->|"Uncaught Exception"| SDK
+    end
+
+    %% ===== SERVER A =====
+    subgraph SERVER_A["SERVER A: Standalone Edge Ingestion Gateway (DMZ / Edge Cluster)"]
+        AUTH["DSN & Token Authenticator<br/>(Validates Project Public Key)"]
+        WAF["Anti-Attack & Security Shield<br/>(Slowloris read timeout, SQLi/RCE scan)"]
+        LIMIT["Body Limit (<=50KB) & Rate Limiter<br/>(Token Bucket / Per-IP & Project)"]
+        SCRUB["Edge PII & Secret Redactor<br/>(Strips passwords, JWTs, keys, emails)"]
+        ACK["Fast ACK to Client<br/>(HTTP 202 Accepted, < 25ms)"]
+        FORWARD["Secure Forwarding Bridge<br/>(Internal HTTPS POST /ingress)"]
+
+        SDK -->|"Public HTTP POST"| AUTH
+        AUTH --> WAF
+        WAF --> LIMIT
+        LIMIT --> SCRUB
+        SCRUB --> ACK
+        SCRUB --> FORWARD
+    end
+
+    %% ===== SERVER B =====
+    subgraph SERVER_B["SERVER B: Main Dashboard & Orchestration Server (Internal Core)"]
+        
+        %% Gate 1 Staging
+        subgraph STAGING1["Stage 1: Ingestion Staging Queue"]
+            RAW_STORE[("Raw Incident Staging Store<br/>Status: staged_raw")]
+            FORWARD -->|"mTLS / Shared Secret"| RAW_STORE
+        end
+
+        %% Gate 1 Decision
+        subgraph CTRL_GATE1["Control Center - Gate 1 Decision"]
+            DECIDE1{"Approval Mode?"}
+            MANUAL1["Human Operator Review<br/>[Approve for AI] or [Dismiss]"]
+            AUTO1["Auto-Dispatch Engine<br/>(Policy: Prod / P1 Match)"]
+            DISMISS["Dismissed / Ignored<br/>(Zero AI tokens spent)"]
+
+            RAW_STORE --> DECIDE1
+            DECIDE1 -->|"Manual Mode"| MANUAL1
+            DECIDE1 -->|"Rule match: P1 / Auto"| AUTO1
+            MANUAL1 -->|"Reject / Spam"| DISMISS
+        end
+
+        %% AI Pipeline
+        subgraph AI_PIPELINE["AI & Git Orchestration Engine"]
+            PARSE["parse.py: Normalize frames & paths"]
+            DEDUPE[("dedupe.py: SQLite fingerprint check")]
+            BLAME["blame.py: GitHub GraphQL blame<br/>at release SHA -> Culprit + diff"]
+            EXPLAIN["explain.py / llm.py: Multi-provider LLM<br/>Hypothesis + 3-point checklist"]
+            SEV["severity.py: Rule-based P1/P2/P3 rating"]
+
+            MANUAL1 -->|"Approved"| PARSE
+            AUTO1 -->|"Triggered"| PARSE
+            PARSE --> DEDUPE
+            DEDUPE -->|"New incident"| BLAME
+            DEDUPE -.->|"Repeat event"| BUMP["Bump count & add comment"]
+            BLAME --> EXPLAIN
+            EXPLAIN --> SEV
+        end
+
+        %% Gate 2 Staging
+        subgraph STAGING2["Stage 2: Draft Issue Staging"]
+            DRAFT_STORE[("Draft Issue Queue<br/>Status: staged_draft")]
+            SEV --> DRAFT_STORE
+        end
+
+        %% Gate 2 Decision
+        subgraph CTRL_GATE2["Control Center - Gate 2 Decision"]
+            DECIDE2{"Publish Mode?"}
+            MANUAL2["Interactive Issue Review<br/>Markdown Preview, Edit Title/Checklist<br/>[Approve & Publish] or [Reject]"]
+            AUTO2["Auto-Publish Engine<br/>(Confidence >= 90% & High Severity)"]
+            REJECT["Draft Rejected / Discarded"]
+
+            DRAFT_STORE --> DECIDE2
+            DECIDE2 -->|"Manual / Semi-Auto"| MANUAL2
+            DECIDE2 -->|"Full-Auto Mode"| AUTO2
+            MANUAL2 -->|"Discard"| REJECT
+        end
+
+        %% Notifications
+        subgraph DISPATCH["External Dispatch & Notifications"]
+            GH["GitHub API<br/>Create Issue with diff, hypothesis, owner"]
+            SLACK["Slack Webhook<br/>Post rich alert card with direct links"]
+
+            MANUAL2 -->|"Signed Off"| GH
+            AUTO2 -->|"Approved"| GH
+            GH --> SLACK
+        end
+    end
+
+    %% ===== Styling =====
+    classDef client fill:#F3F4F6,stroke:#6B7280,color:#1F2937;
+    classDef edgeServer fill:#EEF2FF,stroke:#4F46E5,color:#1E1B4B;
+    classDef coreServer fill:#F8FAFC,stroke:#0EA5E9,color:#082F49;
+    classDef gate fill:#E0E7FF,stroke:#4338CA,color:#312E81;
+    classDef staging fill:#FEF3C7,stroke:#D97706,color:#78350F;
+    classDef human fill:#EDE9FE,stroke:#7C3AED,color:#4C1D95;
+    classDef ai fill:#DBEAFE,stroke:#2563EB,color:#1E40AF;
+    classDef out fill:#D1FAE5,stroke:#059669,color:#065F46;
+    classDef drop fill:#FEE2E2,stroke:#DC2626,color:#991B1B;
+
+    class APP,SDK client;
+    class AUTH,WAF,LIMIT,SCRUB,ACK,FORWARD gate;
+    class RAW_STORE,DRAFT_STORE staging;
+    class MANUAL1,MANUAL2 human;
+    class PARSE,DEDUPE,BLAME,EXPLAIN,SEV,AUTO1,AUTO2 ai;
+    class GH,SLACK out;
+    class DISMISS,REJECT drop;
