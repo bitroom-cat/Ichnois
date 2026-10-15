@@ -173,3 +173,68 @@ def test_layer6_rate_limiter_throttle():
     assert "Retry-After" in res.headers
     assert "Too Many Requests" in res.json()["error"]
 
+
+def test_edge_forwarder_dlq(tmp_path):
+    """Verify that when Server B is unavailable, events are spooled to local SQLite DLQ and can be drained."""
+    from unittest.mock import patch
+    from v2.edge_gateway.forwarder import drain_dlq, forward_to_server_b, init_dlq_db
+    import sqlite3
+
+    dlq_db = str(tmp_path / "test_dlq.db")
+    init_dlq_db(dlq_db)
+
+    # 1. Forwarder attempts delivery to unreachable Server B -> spooled to DLQ
+    with patch("httpx.Client.post", side_effect=Exception("Connection refused (Server B offline)")):
+        success = forward_to_server_b(
+            project_id="test-proj",
+            environment="production",
+            client_ip="192.168.1.100",
+            sanitized_payload={"event_id": "dlq-123", "error": "test"},
+            db_path=dlq_db,
+        )
+        assert success is False
+
+    # Verify DLQ contains 1 record
+    with sqlite3.connect(dlq_db) as conn:
+        cursor = conn.execute("SELECT count(*) FROM edge_dlq;")
+        assert cursor.fetchone()[0] == 1
+
+    # 2. Server B comes back online -> drain_dlq succeeds
+    from unittest.mock import MagicMock
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+
+    with patch("httpx.Client.post", return_value=mock_resp):
+        drained = drain_dlq(max_batch=10, db_path=dlq_db)
+        assert drained == 1
+
+    # Verify DLQ is now empty
+    with sqlite3.connect(dlq_db) as conn:
+        cursor = conn.execute("SELECT count(*) FROM edge_dlq;")
+        assert cursor.fetchone()[0] == 0
+
+
+def test_limiter_lru_eviction():
+    """Verify LeakyBucketLimiter evicts stale/oldest buckets without resetting active limits."""
+    from v2.edge_gateway.limiter import LeakyBucketLimiter
+
+    limiter = LeakyBucketLimiter(capacity=10, fill_rate_per_min=60.0, max_entries=5)
+
+    # Add 5 keys
+    for i in range(5):
+        res = limiter.check(f"key-{i}")
+        assert res.allowed is True
+
+    assert len(limiter._buckets) == 5
+
+    # Exhaust key-0
+    for _ in range(12):
+        limiter.check("key-0")
+    assert limiter.check("key-0").allowed is False
+
+    # Adding a new key should evict an old key, but keep key-0 throttled
+    limiter.check("key-new")
+    assert len(limiter._buckets) <= 5
+    assert limiter.check("key-0").allowed is False
+
+

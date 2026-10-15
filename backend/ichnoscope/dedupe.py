@@ -45,12 +45,39 @@ def init_db(db_path: Path | str | None = None) -> Path | str:
     return db_init(db_path)
 
 
-def claim(fp: str, db_path: Path | str | None = None, now: float | None = None) -> bool:
-    """Claim a fingerprint as a new incident; returns False if fingerprint already claimed."""
-    path = init_db(db_path)
+def claim(
+    fp: str,
+    db_path: Path | str | None = None,
+    now: float | None = None,
+    stale_timeout_s: float = 300.0,
+) -> bool:
+    """Claim a fingerprint as a new incident; reclaims stale abandoned runs if issue_number is NULL and older than stale_timeout_s."""
+    init_db(db_path)
     ts = now if now is not None else time.time()
     try:
         with get_db(db_path) as conn:
+            # Check for existing stale claim without attached issue
+            cursor = conn.execute(
+                "SELECT first_seen, issue_number FROM seen WHERE fp = ?;",
+                (fp,),
+            )
+            row = cursor.fetchone()
+            if row:
+                first_seen = float(row[0])
+                issue_num = row[1]
+                if issue_num is None and (ts - first_seen) > stale_timeout_s:
+                    # Previous run crashed or was abandoned before issue creation; reclaim
+                    conn.execute(
+                        """
+                        UPDATE seen
+                        SET count = 1, first_seen = ?, last_seen = ?, last_comment_at = NULL
+                        WHERE fp = ?;
+                        """,
+                        (ts, ts, fp),
+                    )
+                    return True
+                return False
+
             conn.execute(
                 """
                 INSERT INTO seen (fp, count, first_seen, last_seen, last_comment_at)
@@ -61,6 +88,7 @@ def claim(fp: str, db_path: Path | str | None = None, now: float | None = None) 
             return True
     except sqlite3.IntegrityError:
         return False
+
 
 
 def lookup(fp: str, db_path: Path | str | None = None) -> SeenRow | None:

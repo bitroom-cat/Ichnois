@@ -114,7 +114,11 @@ def execute_investigation(
     state.status = "analyzing"
     save_run(run_id, state, db_path=db_path)
 
-    http_client = client or httpx.Client()
+    import time
+    start_time = time.monotonic()
+    max_timeout_s = float(getattr(settings, "pipeline_timeout_seconds", 45.0))
+
+    http_client = client or httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0))
     close_client = client is None
 
     try:
@@ -167,15 +171,24 @@ def execute_investigation(
             log("blame", f"No suspect identified: {blame_res.error or 'blame inconclusive'}", level="WARN")
 
         state.status = "explaining"
-        explain_res = explain_with_details(
-            incident,
-            state.culprit,
-            other_commits=blame_res.other_commits,
-            settings=settings,
-            client=http_client,
-        )
-        state.explanation = explain_res.explanation
-        if explain_res.explanation:
+        if (time.monotonic() - start_time) > max_timeout_s:
+            log(
+                "pipeline",
+                f"Pipeline exceeded {max_timeout_s}s timeout after blame. Falling back to evidence-only template.",
+                level="WARN",
+            )
+            explain_res = None
+        else:
+            explain_res = explain_with_details(
+                incident,
+                state.culprit,
+                other_commits=blame_res.other_commits,
+                settings=settings,
+                client=http_client,
+            )
+
+        if explain_res and explain_res.explanation:
+            state.explanation = explain_res.explanation
             log(
                 "explain",
                 f"Root cause hypothesis generated via {explain_res.source} "
@@ -184,7 +197,7 @@ def execute_investigation(
         else:
             log(
                 "explain",
-                f"LLM explanation unavailable: {explain_res.reason}. Falling back to evidence-only template.",
+                f"LLM explanation unavailable: {explain_res.reason if explain_res else 'timed out'}. Falling back to evidence-only template.",
                 level="WARN",
             )
 

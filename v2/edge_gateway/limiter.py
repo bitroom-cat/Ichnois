@@ -3,6 +3,7 @@
 Protects against distributed denial-of-service, runaway error loops, and brute-force attacks.
 """
 
+from collections import OrderedDict
 import threading
 import time
 from typing import NamedTuple
@@ -43,13 +44,30 @@ class LeakyBucket:
 
 
 class LeakyBucketLimiter:
-    """Multi-keyed leaky-bucket limiter for Client IPs and Project IDs."""
+    """Multi-keyed leaky-bucket limiter for Client IPs and Project IDs with LRU/TTL eviction."""
 
-    def __init__(self, capacity: int, fill_rate_per_min: float):
+    def __init__(self, capacity: int, fill_rate_per_min: float, max_entries: int = 10000):
         self.capacity = capacity
         self.leak_rate_per_sec = fill_rate_per_min / 60.0
-        self._buckets: dict[str, LeakyBucket] = {}
+        self.max_entries = max_entries
+        self._buckets: OrderedDict[str, LeakyBucket] = OrderedDict()
         self._lock = threading.Lock()
+
+    def _evict_stale_or_lru(self) -> None:
+        """Evict stale (fully drained) buckets, or oldest LRU entries if still over capacity."""
+        now = time.monotonic()
+        # 1. First pass: remove fully drained buckets idle for > 60s
+        stale_keys = [
+            k
+            for k, b in list(self._buckets.items())[:2000]
+            if b.water_level <= 0.0 and (now - b.last_leak_time > 60.0)
+        ]
+        for k in stale_keys:
+            self._buckets.pop(k, None)
+
+        # 2. If still exceeding max_entries, pop oldest LRU items
+        while len(self._buckets) >= self.max_entries:
+            self._buckets.popitem(last=False)
 
     def check(self, key: str) -> RateCheckResult:
         """Check if request for key can be accommodated."""
@@ -57,12 +75,14 @@ class LeakyBucketLimiter:
             return RateCheckResult(allowed=True, retry_after=0)
 
         with self._lock:
-            if key not in self._buckets:
-                # Evict entries if dictionary grows too large
-                if len(self._buckets) > 10000:
-                    self._buckets.clear()
-                self._buckets[key] = LeakyBucket(self.capacity, self.leak_rate_per_sec)
-            bucket = self._buckets[key]
+            if key in self._buckets:
+                self._buckets.move_to_end(key)
+                bucket = self._buckets[key]
+            else:
+                if len(self._buckets) >= self.max_entries:
+                    self._evict_stale_or_lru()
+                bucket = LeakyBucket(self.capacity, self.leak_rate_per_sec)
+                self._buckets[key] = bucket
 
         return bucket.add(1.0)
 
@@ -70,3 +90,4 @@ class LeakyBucketLimiter:
 # Dedicated limiters for IP and Project
 edge_ip_limiter = LeakyBucketLimiter(capacity=60, fill_rate_per_min=60.0)
 edge_project_limiter = LeakyBucketLimiter(capacity=120, fill_rate_per_min=120.0)
+
