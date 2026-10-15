@@ -268,6 +268,17 @@ class Settings(BaseModel):
 
 def load_settings(env: Mapping[str, str]) -> Settings:
     """Build a frozen Settings object from an environment mapping."""
+    merged_env = dict(env)
+    try:
+        from ichnoscope.db import get_system_settings
+        db_settings = get_system_settings()
+        for k, v in db_settings.items():
+            if not env.get(k):
+                merged_env[k] = v
+    except Exception:
+        pass
+    env = merged_env
+
     # GitHub and Sentry
     github_token = _parse_secret(env.get("GITHUB_TOKEN"))
     github_repository = _parse_str(env.get("GITHUB_REPOSITORY"))

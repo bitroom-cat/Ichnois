@@ -208,16 +208,40 @@ It never modifies source code, opens fix PRs, deploys changes or rolls anything 
 | Severity | P1, P2 or P3 from numbers | Yes |
 | Dispatch | Draft, approve and publish the issue, notify Slack | Yes |
 
-### Planned dashboard deployment
+### 3-Tier Production Architecture
 
 ```text
- Next.js dashboard (Vercel)  --->  FastAPI backend (Python host)  --->  PostgreSQL
-   server routes hold the            pipeline, publisher,              runs, run_logs,
-   admin token, never the            /webhook/sentry (HMAC)            settings, repos, seen
-   browser                           /api/* (admin token)
+ ┌────────────────────────────────────────────────────────┐
+ │ ZONE 1: PUBLIC / INGESTION (SERVER A - EDGE GATEWAY)   │
+ │ Endpoint: https://ichnoisapi.onrender.com              │
+ │ • 8-layer security perimeter (DoS, 50KB ceiling)       │
+ │ • Edge DLP & PII scrubbing                             │
+ │ • Leaky-Bucket Rate Limiter with LRU eviction          │
+ │ • SQLite Dead-Letter Queue (DLQ) spooling              │
+ └───────────────────────────┬────────────────────────────┘
+                             │ Encrypted Internal Ingress (HMAC)
+                             ▼
+ ┌────────────────────────────────────────────────────────┐
+ │ ZONE 2: CORE PLATFORM (SERVER B - ORCHESTRATOR)        │
+ │ Endpoint: https://ichnoscope-backend.onrender.com      │
+ │ • Gate 1: Ingestion inbox & policy rule engine         │
+ │ • Evidence Engine: Git Blame at release SHA            │
+ │ • AI Synthesis: Multi-LLM provider fallback chain      │
+ │ • Gate 2: Human-in-the-loop draft review & publish     │
+ │ • Storage: SQLite / Turso libSQL distributed DB        │
+ └───────────────────────────▲────────────────────────────┘
+                             │ Bearer Auth (/api/*) + CORS
+                             │
+ ┌───────────────────────────┴────────────────────────────┐
+ │ ZONE 3: CONTROL PLANE (NEXT.JS 14 WEB DASHBOARD)       │
+ │ Endpoint: https://ichnoscope-wcc-30.vercel.app         │
+ │ • Incident radar & real-time run logs                  │
+ │ • Gate 1 & Gate 2 interactive approval cockpit         │
+ │ • Multi-project telemetry credentials manager          │
+ └────────────────────────────────────────────────────────┘
 ```
 
-The dashboard polls run logs every few seconds instead of using websockets. GitHub and LLM credentials live only in the backend environment and are never exposed to the browser.
+The dashboard communicates with Server B via authenticated `/api/*` endpoints using Bearer token authentication and strict CORS whitelisting. GitHub and LLM credentials live securely in Server B's environment and are never exposed to clients.
 
 ### Design decisions
 

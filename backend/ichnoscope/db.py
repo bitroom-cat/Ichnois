@@ -238,6 +238,13 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             created_at REAL NOT NULL
         );
         """,
+        """
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """,
         "CREATE INDEX IF NOT EXISTS idx_runs_updated ON runs (updated_at DESC);",
         "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs (status);",
         "CREATE INDEX IF NOT EXISTS idx_logs_run_id ON run_logs (run_id, timestamp);",
@@ -326,5 +333,37 @@ def migrate_to_v2(conn: Any) -> None:
             );
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """
+        )
     except Exception as exc:  # noqa: BLE001
         logger.debug("Auxiliary table create skipped: %s", exc)
+
+
+def save_system_setting(key: str, value: str, db_path: Path | str | None = None) -> None:
+    """Persist system setting to SQLite/Turso database."""
+    init_db(db_path)
+    import time
+    now = time.time()
+    with get_db(db_path) as conn:
+        cursor = conn.execute("SELECT key FROM system_settings WHERE key = ?;", (key,))
+        if cursor.fetchone():
+            conn.execute("UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?;", (value, now, key))
+        else:
+            conn.execute("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?);", (key, value, now))
+
+
+def get_system_settings(db_path: Path | str | None = None) -> dict[str, str]:
+    """Retrieve all persisted system settings from SQLite/Turso database."""
+    init_db(db_path)
+    with get_db(db_path) as conn:
+        cursor = conn.execute("SELECT key, value FROM system_settings;")
+        rows = cursor.fetchall()
+        return {r[0]: r[1] for r in rows}
+

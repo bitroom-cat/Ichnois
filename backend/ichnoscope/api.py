@@ -330,8 +330,17 @@ class SlackTestRequest(BaseModel):
     webhook_url: str | None = None
 
 
+from ichnoscope.db import save_system_setting
+
+
 def _persist_env_update(updates: dict[str, str]) -> None:
-    """Best-effort persistence of updated env vars back to .env file if it exists."""
+    """Persist updated settings to SQLite/Turso database and best-effort to local .env file."""
+    for k, v in updates.items():
+        try:
+            save_system_setting(k, str(v))
+        except Exception:
+            pass
+
     for candidate in [Path("backend/.env"), Path(".env")]:
         if candidate.is_file():
             try:
@@ -446,11 +455,12 @@ def api_test_slack(req: SlackTestRequest | None = None) -> dict[str, Any]:
             detail="No Slack Webhook URL configured. Please enter a valid Slack webhook URL in Settings.",
         )
 
+    repo = settings.github_repository or "ichnoscope-org/incident-tracker"
     ok = notify_slack(
         title="Ichnoscope Incident Alert Test",
         severity="P2-High",
         assignee="ichnoscope-bot",
-        issue_url="https://github.com/vanshikarana06/ichnoscope_demo_we_app/issues/1",
+        issue_url=f"https://github.com/{repo}/issues/1",
         webhook_url=target_url,
     )
     if ok:

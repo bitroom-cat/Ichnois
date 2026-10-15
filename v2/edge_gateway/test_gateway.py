@@ -238,3 +238,34 @@ def test_limiter_lru_eviction():
     assert limiter.check("key-0").allowed is False
 
 
+def test_legitimate_sql_stacktrace_not_blocked():
+    """Verify legitimate SQL queries inside stack traces or error frames are not rejected as attacks."""
+    from v2.edge_gateway.security import inspect_payload
+    import json
+
+    payload = {
+        "event_id": "sql_err_01",
+        "exception": {
+            "values": [
+                {
+                    "type": "OperationalError",
+                    "value": "syntax error at or near 'WHERE id = 1'",
+                    "stacktrace": {
+                        "frames": [
+                            {
+                                "filename": "db/query.py",
+                                "line": 42,
+                                "context_line": "cursor.execute('SELECT name FROM users WHERE id = %s', [user_id])",
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+    }
+    raw_bytes = json.dumps(payload).encode("utf-8")
+    result = inspect_payload(raw_bytes)
+    assert result["event_id"] == "sql_err_01"
+
+
+
