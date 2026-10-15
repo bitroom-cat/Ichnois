@@ -60,9 +60,10 @@ def serialize_run(run_id: str, state: Any) -> dict[str, Any]:
 def api_list_runs(
     status: str | None = Query(default=None),
     severity: str | None = Query(default=None),
+    project_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[dict[str, Any]]:
-    """List recent incident triage runs for the Control Center board."""
+    """List recent incident triage runs for the Control Center board, optionally scoped to a project."""
     aliases = {
         "staged_draft": {"staged_draft", "draft_ready"},
         "draft_ready": {"staged_draft", "draft_ready"},
@@ -70,7 +71,7 @@ def api_list_runs(
         "analyzing": {"analyzing", "parsing", "blaming", "explaining"},
         "dismissed": {"dismissed", "rejected"},
     }
-    raw_runs = list_runs(limit=limit)
+    raw_runs = list_runs(limit=limit, project_id=project_id)
     wanted = aliases.get(status, {status} if status else None)
     items: list[dict[str, Any]] = []
     for run_id, state in raw_runs:
@@ -556,3 +557,108 @@ def api_replay_fixture(fixture: str = "payment_npe") -> dict[str, Any]:
     settings = get_settings()
     run_id, _state, _auto = ingest_incident(payload=payload, settings=settings, apply_policy=True)
     return api_get_run(run_id)
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str
+    environment: str = "production"
+    rate_limit_min: int = 120
+    github_repo_override: str | None = None
+    slack_channel_override: str | None = None
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: str | None = None
+    environment: str | None = None
+    rate_limit_min: int | None = None
+    github_repo_override: str | None = None
+    slack_channel_override: str | None = None
+    is_active: bool | None = None
+
+
+@router.get("/projects")
+def api_list_projects() -> list[dict[str, Any]]:
+    """List all registered projects with credentials and metadata."""
+    from ichnoscope.projects import list_projects
+
+    projects = list_projects()
+    return [p.to_safe_dict() for p in projects]
+
+
+@router.post("/projects")
+def api_create_project(req: ProjectCreateRequest) -> dict[str, Any]:
+    """Register a new application project and issue public/secret API keys."""
+    from ichnoscope.projects import create_project
+
+    project = create_project(
+        name=req.name,
+        environment=req.environment,
+        rate_limit_min=req.rate_limit_min,
+        github_repo_override=req.github_repo_override,
+        slack_channel_override=req.slack_channel_override,
+    )
+    return project.model_dump()
+
+
+@router.get("/projects/{project_id}")
+def api_get_project(project_id: str) -> dict[str, Any]:
+    """Retrieve details for a specific project."""
+    from ichnoscope.projects import get_project
+
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return project.to_safe_dict()
+
+
+@router.patch("/projects/{project_id}")
+def api_update_project(project_id: str, req: ProjectUpdateRequest) -> dict[str, Any]:
+    """Update settings or active status for a specific project."""
+    from ichnoscope.projects import update_project
+
+    updated = update_project(project_id, req.model_dump(exclude_unset=True))
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return updated.to_safe_dict()
+
+
+@router.delete("/projects/{project_id}")
+def api_delete_project(project_id: str) -> dict[str, Any]:
+    """Delete a registered project."""
+    from ichnoscope.projects import delete_project
+
+    ok = delete_project(project_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return {"status": "deleted", "project_id": project_id}
+
+
+@router.post("/projects/{project_id}/keys/rotate")
+def api_rotate_project_key(project_id: str) -> dict[str, Any]:
+    """Rotate public and secret credentials for a registered project."""
+    from ichnoscope.projects import rotate_project_key
+
+    project = rotate_project_key(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return project.model_dump()
+
+
+@router.get("/internal/v1/projects/cache")
+@router.get("/internal/v1/projects/keys")
+def api_internal_projects_cache() -> dict[str, Any]:
+    """Internal cache synchronization endpoint for Server A (Edge Gateway)."""
+    from ichnoscope.projects import list_projects
+
+    projects = list_projects()
+    cache: dict[str, dict[str, Any]] = {}
+    for p in projects:
+        if p.is_active:
+            cache[p.public_key] = {
+                "project_id": p.project_id,
+                "name": p.name,
+                "environment": p.environment,
+                "rate_limit_min": p.rate_limit_min,
+            }
+    return {"projects": cache, "count": len(cache)}
+

@@ -234,6 +234,8 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             secret_key TEXT NOT NULL,
             rate_limit_min INTEGER DEFAULT 120,
             environment TEXT DEFAULT 'production',
+            github_repo_override TEXT,
+            slack_channel_override TEXT,
             is_active INTEGER DEFAULT 1,
             created_at REAL NOT NULL
         );
@@ -249,6 +251,7 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
         "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs (status);",
         "CREATE INDEX IF NOT EXISTS idx_logs_run_id ON run_logs (run_id, timestamp);",
         "CREATE INDEX IF NOT EXISTS idx_gate_reviews_run ON gate_reviews (run_id, gate);",
+        "CREATE INDEX IF NOT EXISTS idx_project_keys_public ON project_keys (public_key);",
     ]
 
     if turso_url and turso_token and db_path is None and DEFAULT_RUNS_DB == "ichnoscope_runs.db":
@@ -328,11 +331,18 @@ def migrate_to_v2(conn: Any) -> None:
                 secret_key TEXT NOT NULL,
                 rate_limit_min INTEGER DEFAULT 120,
                 environment TEXT DEFAULT 'production',
+                github_repo_override TEXT,
+                slack_channel_override TEXT,
                 is_active INTEGER DEFAULT 1,
                 created_at REAL NOT NULL
             );
             """
         )
+        for col in ["github_repo_override", "slack_channel_override"]:
+            try:
+                conn.execute(f"ALTER TABLE project_keys ADD COLUMN {col} TEXT;")
+            except Exception:
+                pass
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS system_settings (

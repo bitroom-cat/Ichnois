@@ -6,6 +6,7 @@ import json
 import logging
 
 import os
+from typing import Any
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -192,5 +193,46 @@ async def server_a_internal_ingress(
     # Forward directly to Stage 1 Ingestion Staging Queue (Gate 1)
     bg.add_task(ingest_incident, payload, project_id=project_id, environment=environment)
     return {"status": "staged_at_server_b", "gate": "gate_1_staging"}
+
+
+@app.get("/internal/v1/projects/cache")
+@app.get("/internal/v1/projects/keys")
+async def server_a_projects_cache(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Internal project key cache sync endpoint for Server A (Edge Gateway)."""
+    settings = get_settings()
+    expected_secret = (
+        settings.internal_gateway_secret.get_secret_value()
+        if settings.internal_gateway_secret
+        else None
+    )
+    if not expected_secret:
+        if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("ENVIRONMENT") in {"test", "dev"}:
+            expected_secret = "ichnoscope-internal-gateway-token-v2"
+        else:
+            raise HTTPException(status_code=500, detail="INTERNAL_GATEWAY_SECRET is not configured")
+
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    token = authorization.replace("Bearer ", "").strip()
+    if not hmac.compare_digest(token, expected_secret):
+        raise HTTPException(status_code=401, detail="Invalid internal gateway token")
+
+    from ichnoscope.projects import list_projects
+
+    projects = list_projects()
+    cache: dict[str, dict[str, Any]] = {}
+    for p in projects:
+        if p.is_active:
+            cache[p.public_key] = {
+                "project_id": p.project_id,
+                "name": p.name,
+                "environment": p.environment,
+                "rate_limit_min": p.rate_limit_min,
+            }
+    return {"projects": cache, "count": len(cache)}
+
 
 

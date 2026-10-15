@@ -205,6 +205,17 @@ def execute_investigation(
         state.severity = severity
         log("severity", f"Rated severity: {severity} ({severity_reason})")
 
+        repo = settings.github_repository
+        if state.project_id:
+            try:
+                from ichnoscope.projects import get_project
+
+                proj = get_project(state.project_id, db_path=db_path)
+                if proj and proj.github_repo_override:
+                    repo = proj.github_repo_override
+            except Exception:
+                pass
+
         draft = build_issue_draft(
             incident=incident,
             culprit=state.culprit,
@@ -213,7 +224,7 @@ def execute_investigation(
             severity_reason=severity_reason,
             fingerprint=fp,
             is_regression=state.is_regression,
-            repo=settings.github_repository,
+            repo=repo,
             fallback_assignee=settings.fallback_assignee,
         )
         if not state.draft_title_override:
@@ -262,6 +273,21 @@ def publish_draft_issue(
     body = body_override or state.draft_body_override
     assignee = custom_assignee or state.custom_assignee
 
+    repo_override = None
+    channel_override = None
+    if state.project_id:
+        try:
+            from ichnoscope.projects import get_project
+
+            proj = get_project(state.project_id, db_path=db_path)
+            if proj:
+                if proj.github_repo_override:
+                    repo_override = proj.github_repo_override
+                if proj.slack_channel_override:
+                    channel_override = proj.slack_channel_override
+        except Exception:
+            pass
+
     try:
         pub_res = publish_issue(
             incident=state.incident,
@@ -275,6 +301,7 @@ def publish_draft_issue(
             title_override=title,
             body_override=body,
             assignee_override=assignee,
+            repo_override=repo_override,
         )
         state.issue_url = pub_res.issue_url
         state.status = "published"
@@ -286,6 +313,7 @@ def publish_draft_issue(
             severity=state.severity or "P3-Medium",
             assignee=pub_res.assignee,
             issue_url=pub_res.issue_url,
+            channel_override=channel_override,
             settings=settings,
             client=http_client,
         )

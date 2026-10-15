@@ -100,29 +100,26 @@ def list_runs(
     db_path: Path | str | None = None,
     limit: int = 50,
     status: str | None = None,
+    project_id: str | None = None,
 ) -> list[tuple[str, RunState]]:
-    """List most recently updated runs up to limit, optionally filtered by status."""
-    path = init_db(db_path)
+    """List most recently updated runs up to limit, optionally filtered by status and project_id."""
+    init_db(db_path)
     with get_db(db_path) as conn:
+        query = "SELECT id, state_json FROM runs"
+        params: list[Any] = []
+        wheres: list[str] = []
         if status:
-            cursor = conn.execute(
-                """
-                SELECT id, state_json FROM runs
-                WHERE status = ?
-                ORDER BY updated_at DESC
-                LIMIT ?;
-                """,
-                (status, limit),
-            )
-        else:
-            cursor = conn.execute(
-                """
-                SELECT id, state_json FROM runs
-                ORDER BY updated_at DESC
-                LIMIT ?;
-                """,
-                (limit,),
-            )
+            wheres.append("status = ?")
+            params.append(status)
+        if project_id:
+            wheres.append("project_id = ?")
+            params.append(project_id)
+        if wheres:
+            query += " WHERE " + " AND ".join(wheres)
+        query += " ORDER BY updated_at DESC LIMIT ?;"
+        params.append(limit)
+
+        cursor = conn.execute(query, tuple(params))
         results: list[tuple[str, RunState]] = []
         for r_id, raw_json in cursor.fetchall():
             try:

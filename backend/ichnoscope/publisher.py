@@ -76,6 +76,7 @@ def publish_issue(
     title_override: str | None = None,
     body_override: str | None = None,
     assignee_override: str | None = None,
+    repo_override: str | None = None,
 ) -> PublishResult:
     """Publish a drafted incident issue to GitHub, honoring dry_run mode."""
     if settings is None:
@@ -85,6 +86,11 @@ def publish_issue(
 
     owner = settings.github_owner
     repo = settings.github_repo_name
+    target_repo_full = repo_override or settings.github_repository
+    if repo_override and "/" in repo_override:
+        parts = repo_override.split("/", 1)
+        owner, repo = parts[0], parts[1]
+
     token = settings.github_token.get_secret_value() if settings.github_token else None
     fp = fingerprint or calc_fingerprint(incident)
 
@@ -97,7 +103,7 @@ def publish_issue(
         fingerprint=fp,
         is_regression=is_regression,
         previous_issue_number=previous_issue_number,
-        repo=settings.github_repository,
+        repo=target_repo_full,
         fallback_assignee=assignee_override or settings.fallback_assignee,
     )
     if title_override:
