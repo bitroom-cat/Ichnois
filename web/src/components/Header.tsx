@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useTheme } from '@/lib/theme';
 import { api } from '@/lib/api';
+import { ProjectSwitcher } from '@/components/ProjectSwitcher';
 import {
   Search,
   Plus,
@@ -64,14 +65,8 @@ export function Header({ currentTitle, onOpenSearch }: HeaderProps) {
             </div>
           </Link>
 
-          {/* Workspace Dropdown */}
-          <div className="flex items-center gap-1.5 px-2 py-1 rounded hover:bg-hover cursor-pointer text-text-primary font-medium shrink-0 transition-colors">
-            <span className="w-4 h-4 rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 flex items-center justify-center text-[10px] font-bold">
-              M
-            </span>
-            <span>My Workspace</span>
-            <ChevronDown className="w-3 h-3 text-text-muted" />
-          </div>
+          {/* Project Switcher */}
+          <ProjectSwitcher />
 
           <span className="text-text-muted hidden sm:inline">/</span>
 

@@ -80,6 +80,39 @@ export interface PolicyDocument {
   updated_at?: number;
 }
 
+export interface Project {
+  project_id: string;
+  name: string;
+  public_key: string;
+  secret_key?: string;
+  rate_limit_min: number;
+  environment: string;
+  github_repo_override?: string | null;
+  slack_channel_override?: string | null;
+  is_active: boolean;
+  created_at: number;
+}
+
+export interface ProjectCreateInput {
+  name: string;
+  environment?: string;
+  rate_limit_min?: number;
+  github_repo_override?: string;
+  slack_channel_override?: string;
+}
+
+export function getSelectedProjectId(): string {
+  if (typeof window === 'undefined') return 'all';
+  return localStorage.getItem('ichnoscope_selected_project_id') || 'all';
+}
+
+export function setSelectedProjectId(projectId: string): void {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('ichnoscope_selected_project_id', projectId);
+    window.dispatchEvent(new CustomEvent('project_changed', { detail: { projectId } }));
+  }
+}
+
 export interface RunItem {
   id: string;
   status: any;
@@ -448,12 +481,16 @@ const DEFAULT_HEALTH: DependencyHealth[] = [
 ];
 
 export const api = {
-  getRuns: async (): Promise<any[]> => {
+  getRuns: async (projectId?: string): Promise<any[]> => {
     try {
-      const res = await apiFetch(`${BACKEND_URL}/api/runs`, { cache: 'no-store' });
+      const targetProj = projectId && projectId !== 'all' ? projectId : undefined;
+      const url = targetProj
+        ? `${BACKEND_URL}/api/runs?project_id=${encodeURIComponent(targetProj)}`
+        : `${BACKEND_URL}/api/runs`;
+      const res = await apiFetch(url, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
+        if (Array.isArray(data)) {
           return data.map(formatBackendRun);
         }
       }
@@ -462,7 +499,10 @@ export const api = {
     }
 
     const runs = getStoredRuns();
-    return runs.map(toRunItem);
+    const filtered = projectId && projectId !== 'all'
+      ? runs.filter((r) => r.project_id === projectId || r.projectId === projectId)
+      : runs;
+    return filtered.map(toRunItem);
   },
 
   getRunById: async (id: string): Promise<any | null> => {
@@ -945,5 +985,65 @@ export const api = {
     runs.unshift(newRun);
     saveStoredRuns(runs);
     return toRunItem(newRun);
+  },
+
+  getProjects: async (): Promise<Project[]> => {
+    try {
+      const res = await apiFetch(`${BACKEND_URL}/api/projects`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          return data;
+        }
+      }
+    } catch {
+      // Fallback
+    }
+    return [
+      {
+        project_id: 'proj_default',
+        name: 'Default Application',
+        public_key: 'sentry_public_key',
+        secret_key: 'sk_live_default_...',
+        rate_limit_min: 120,
+        environment: 'production',
+        is_active: true,
+        created_at: Date.now() / 1000,
+      },
+    ];
+  },
+
+  createProject: async (payload: ProjectCreateInput): Promise<Project> => {
+    const res = await apiFetch(`${BACKEND_URL}/api/projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to create project');
+    }
+    return res.json();
+  },
+
+  rotateProjectKey: async (projectId: string): Promise<Project> => {
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/keys/rotate`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to rotate project credentials');
+    }
+    return res.json();
+  },
+
+  deleteProject: async (projectId: string): Promise<void> => {
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to delete project');
+    }
   },
 };

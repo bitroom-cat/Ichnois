@@ -53,6 +53,12 @@ export function Sidebar({
       badge: 'Live',
     },
     {
+      href: '/app/projects',
+      label: 'Projects & DSNs',
+      shortLabel: 'Projects',
+      icon: <Layers className="w-4 h-4 shrink-0" />,
+    },
+    {
       href: '/app/settings',
       label: 'Settings',
       shortLabel: 'Settings',

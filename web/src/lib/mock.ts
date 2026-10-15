@@ -29,6 +29,8 @@ export interface RunSummary {
   createdAt: string;
   updatedAt: string;
   issueUrl?: string;
+  project_id?: string;
+  projectId?: string;
 }
 
 export interface StackFrame {
