@@ -5,8 +5,11 @@ import hmac
 import json
 import logging
 
+import os
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 from ichnoscope.api import router as api_router, serialize_run
 from ichnoscope.config import get_settings
@@ -20,11 +23,76 @@ app = FastAPI(
     version="2.1.0",
 )
 
+
+class DashboardAuthMiddleware(BaseHTTPMiddleware):
+    """Enforce Bearer token authorization on /api/* control-plane routes."""
+
+    EXEMPT_PATHS = {
+        "/healthz",
+        "/webhook/sentry",
+        "/api/webhook/sentry",
+    }
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        # 1. Allow CORS OPTIONS preflight unconditionally
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # 2. Allow exempt public paths or internal gateway routes (which have dedicated HMAC auth)
+        if path in self.EXEMPT_PATHS or path.startswith("/internal/v1/"):
+            return await call_next(request)
+
+        # 3. Only intercept /api/* routes
+        if not path.startswith("/api"):
+            return await call_next(request)
+
+        settings = get_settings()
+        admin_token = settings.admin_token.get_secret_value() if settings.admin_token else None
+
+        # If admin_token is configured, strictly enforce Bearer token
+        if admin_token:
+            auth_header = request.headers.get("Authorization")
+            if not auth_header:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Missing Authorization header with Bearer token for Dashboard API"},
+                )
+
+            token = auth_header.replace("Bearer ", "").strip()
+            if not hmac.compare_digest(token, admin_token):
+                logger.warning("Unauthorized access attempt to %s with invalid admin token", path)
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid Admin Bearer token"},
+                )
+        else:
+            enforce_strict = os.getenv("ENFORCE_ADMIN_TOKEN", "false").lower() == "true"
+            if enforce_strict:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "ADMIN_TOKEN is required but not configured"},
+                )
+
+        return await call_next(request)
+
+
+# Allowed CORS origins
+DEFAULT_ALLOWED_ORIGINS = [
+    "https://ichnoscope-wcc-30.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+custom_origins = os.getenv("CORS_ALLOWED_ORIGINS")
+allowed_origins = [o.strip() for o in custom_origins.split(",") if o.strip()] if custom_origins else DEFAULT_ALLOWED_ORIGINS
+
+app.add_middleware(DashboardAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r".*",
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -89,13 +157,27 @@ async def server_a_internal_ingress(
     expected_secret = (
         settings.internal_gateway_secret.get_secret_value()
         if settings.internal_gateway_secret
-        else "ichnoscope-internal-gateway-token-v2"
+        else None
     )
-    if authorization:
-        token = authorization.replace("Bearer ", "").strip()
-        if token != expected_secret:
-            logger.warning("Unauthorized internal ingress attempt with token: %s", token[:6] + "...")
-            raise HTTPException(status_code=401, detail="Invalid internal gateway token")
+    if not expected_secret:
+        # In testing/dev environments, allow default token if not explicitly provided
+        if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("ENVIRONMENT") in {"test", "dev"}:
+            expected_secret = "ichnoscope-internal-gateway-token-v2"
+        else:
+            logger.error("INTERNAL_GATEWAY_SECRET is not configured on Server B")
+            raise HTTPException(
+                status_code=500,
+                detail="Server misconfigured: INTERNAL_GATEWAY_SECRET is not configured",
+            )
+
+    if not authorization:
+        logger.warning("Internal ingress attempt without Authorization header")
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    token = authorization.replace("Bearer ", "").strip()
+    if not hmac.compare_digest(token, expected_secret):
+        logger.warning("Unauthorized internal ingress attempt with invalid token")
+        raise HTTPException(status_code=401, detail="Invalid internal gateway token")
 
     try:
         envelope = await request.json()
@@ -110,4 +192,5 @@ async def server_a_internal_ingress(
     # Forward directly to Stage 1 Ingestion Staging Queue (Gate 1)
     bg.add_task(ingest_incident, payload, project_id=project_id, environment=environment)
     return {"status": "staged_at_server_b", "gate": "gate_1_staging"}
+
 

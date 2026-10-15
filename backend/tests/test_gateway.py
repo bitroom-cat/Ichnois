@@ -179,3 +179,80 @@ def test_api_settings_and_health():
     resp_health = client.get("/api/health")
     assert resp_health.status_code == 200
     assert len(resp_health.json()) in (4, 5)
+
+
+def test_internal_ingress_auth(monkeypatch):
+    from ichnoscope.config import get_settings
+
+    secret = "custom-internal-gateway-secret-test"
+    monkeypatch.setenv("INTERNAL_GATEWAY_SECRET", secret)
+    get_settings.cache_clear()
+
+    envelope = {
+        "gateway_received_at": 1729000000.0,
+        "project_id": "test-project",
+        "environment": "staging",
+        "client_ip_hash": "sha256hash",
+        "sanitized_payload": {"event": {"id": "test"}},
+    }
+
+    # 1. Missing Authorization header -> 401
+    resp_missing = client.post("/internal/v1/incidents/ingress", json=envelope)
+    assert resp_missing.status_code == 401
+    assert "Missing Authorization" in resp_missing.json()["detail"]
+
+    # 2. Invalid token -> 401
+    resp_bad = client.post(
+        "/internal/v1/incidents/ingress",
+        json=envelope,
+        headers={"Authorization": "Bearer wrong-secret-token"},
+    )
+    assert resp_bad.status_code == 401
+    assert "Invalid internal gateway token" in resp_bad.json()["detail"]
+
+    # 3. Valid token -> 200
+    with patch("ichnoscope.main.ingest_incident") as mock_ingest:
+        resp_valid = client.post(
+            "/internal/v1/incidents/ingress",
+            json=envelope,
+            headers={"Authorization": f"Bearer {secret}"},
+        )
+        assert resp_valid.status_code == 200
+        assert resp_valid.json()["status"] == "staged_at_server_b"
+        assert mock_ingest.called
+
+
+def test_dashboard_bearer_auth(monkeypatch):
+    from ichnoscope.config import get_settings
+
+    token = "admin-secret-key-xyz789"
+    monkeypatch.setenv("ADMIN_TOKEN", token)
+    get_settings.cache_clear()
+
+    # 1. Unauthenticated request to /api/* -> 401
+    resp_no_auth = client.get("/api/settings")
+    assert resp_no_auth.status_code == 401
+
+    # 2. Invalid Bearer token -> 401
+    resp_wrong_token = client.get(
+        "/api/settings",
+        headers={"Authorization": "Bearer bad-token"},
+    )
+    assert resp_wrong_token.status_code == 401
+
+    # 3. Valid Bearer token -> 200
+    resp_authed = client.get(
+        "/api/settings",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_authed.status_code == 200
+    assert "dry_run" in resp_authed.json()
+
+    # 4. Public health check /healthz is exempt
+    resp_health = client.get("/healthz")
+    assert resp_health.status_code == 200
+
+    # Clean up settings
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    get_settings.cache_clear()
+

@@ -155,6 +155,29 @@ export const USE_MOCK_API = false; // Primary live mode with automatic fallback
 
 const STORAGE_KEY = 'ichnoscope_runs_v2';
 
+export function getAdminToken(): string | null {
+  if (typeof window !== 'undefined') {
+    const local = localStorage.getItem('ichnoscope_admin_token');
+    if (local) return local;
+  }
+  return process.env.NEXT_PUBLIC_ADMIN_TOKEN || null;
+}
+
+export function setAdminToken(token: string) {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('ichnoscope_admin_token', token);
+  }
+}
+
+export async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const token = getAdminToken();
+  const headers = new Headers(init.headers || {});
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return fetch(url, { ...init, headers });
+}
+
 function formatBackendRun(b: any): RunItem {
   const inc = b.incident || {};
   const exp = b.explanation || {};
@@ -427,7 +450,7 @@ const DEFAULT_HEALTH: DependencyHealth[] = [
 export const api = {
   getRuns: async (): Promise<any[]> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs`, { cache: 'no-store' });
+      const res = await apiFetch(`${BACKEND_URL}/api/runs`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
@@ -444,7 +467,7 @@ export const api = {
 
   getRunById: async (id: string): Promise<any | null> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}`, { cache: 'no-store' });
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         return formatBackendRun(data);
@@ -461,7 +484,7 @@ export const api = {
 
   approveRun: async (id: string): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/approve`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/approve`, {
         method: 'POST',
       });
       if (res.ok) {
@@ -500,7 +523,7 @@ export const api = {
 
   rejectRun: async (id: string, reason?: string): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/reject`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/reject`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason }),
@@ -539,7 +562,7 @@ export const api = {
 
   gate1Approve: async (id: string, options?: { reviewer?: string; notes?: string }): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate1/approve`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/gate1/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(options || {}),
@@ -571,7 +594,7 @@ export const api = {
 
   gate1Dismiss: async (id: string, options?: { reviewer?: string; reason?: string }): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate1/dismiss`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/gate1/dismiss`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(options || {}),
@@ -612,7 +635,7 @@ export const api = {
     }
   ): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate2/approve`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/gate2/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(options || {}),
@@ -628,7 +651,7 @@ export const api = {
 
   gate2Reject: async (id: string, options?: { reviewer?: string; reason?: string }): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate2/reject`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/gate2/reject`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(options || {}),
@@ -647,7 +670,7 @@ export const api = {
     data: { draft_title?: string; draft_body?: string; custom_assignee?: string }
   ): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/draft`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/draft`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -676,7 +699,7 @@ export const api = {
 
   getPolicies: async (): Promise<{ default_mode: string; policies: PolicyDocument[] }> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/policies`, { cache: 'no-store' });
+      const res = await apiFetch(`${BACKEND_URL}/api/policies`, { cache: 'no-store' });
       if (res.ok) {
         return await res.json();
       }
@@ -717,7 +740,7 @@ export const api = {
 
   upsertPolicy: async (policy: { id?: string; name: string; is_active: boolean; rule: any }): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/policies`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/policies`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(policy),
@@ -733,7 +756,7 @@ export const api = {
 
   rerunTriage: async (id: string): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/rerun`, { method: 'POST' });
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/rerun`, { method: 'POST' });
       if (res.ok) {
         const updated = await api.getRunById(id);
         return updated;
@@ -767,7 +790,7 @@ export const api = {
 
   getHealth: async (): Promise<DependencyHealth[]> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/health`, { cache: 'no-store' });
+      const res = await apiFetch(`${BACKEND_URL}/api/health`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
@@ -791,7 +814,7 @@ export const api = {
 
   getSettings: async (): Promise<SystemSettings> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/settings`, { cache: 'no-store' });
+      const res = await apiFetch(`${BACKEND_URL}/api/settings`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         return {
@@ -842,7 +865,7 @@ export const api = {
         admin_token: settings.admin_token,
         automation_mode: settings.automation_mode,
       };
-      const res = await fetch(`${BACKEND_URL}/api/settings`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -872,7 +895,7 @@ export const api = {
   },
 
   testSlackWebhook: async (webhookUrl?: string): Promise<{ ok: boolean; message: string }> => {
-    const res = await fetch(`${BACKEND_URL}/api/notifications/slack/test`, {
+    const res = await apiFetch(`${BACKEND_URL}/api/notifications/slack/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ webhook_url: webhookUrl || undefined }),
@@ -901,7 +924,7 @@ export const api = {
 
   replaySavedFixture: async (fixture: string): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/replay?fixture=${encodeURIComponent(fixture)}`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/replay?fixture=${encodeURIComponent(fixture)}`, {
         method: 'POST',
       });
       if (res.ok) {

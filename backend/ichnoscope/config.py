@@ -288,7 +288,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     path_prefix_strip = raw_path_prefix if not raw_path_prefix or raw_path_prefix.endswith("/") else f"{raw_path_prefix}/"
     fallback_assignee = _parse_str(env.get("FALLBACK_ASSIGNEE"))
     slack_webhook_url = _parse_secret(env.get("SLACK_WEBHOOK_URL"))
-    admin_token = _parse_secret(env.get("ADMIN_TOKEN"))
+    admin_token = _parse_secret(env.get("ADMIN_TOKEN") or env.get("ICHNOSCOPE_ADMIN_TOKEN"))
     internal_gateway_secret = _parse_secret(
         env.get("INTERNAL_GATEWAY_SECRET") or env.get("INTERNAL_GATEWAY_TOKEN")
     )

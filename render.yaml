@@ -35,7 +35,11 @@ services:
       - key: SLACK_WEBHOOK_URL
         sync: false
       - key: INTERNAL_GATEWAY_SECRET
-        value: ichnoscope-internal-gateway-token-v2
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://ichnoscope-wcc-30.vercel.app,http://localhost:3000
       - key: AUTOMATION_MODE
         value: semi_autonomous
 
@@ -55,13 +59,13 @@ services:
       - key: INTERNAL_CORE_URL
         value: https://ichnoscope-backend.onrender.com/internal/v1/incidents/ingress
       - key: INTERNAL_GATEWAY_SECRET
-        value: ichnoscope-internal-gateway-token-v2
+        sync: false
       - key: EDGE_ALLOWED_PROJECT_KEYS
         value: sentry_public_key,demo_key,prod_client_key
       - key: EDGE_ENFORCE_AUTH_WHITELIST
-        value: "false"
+        value: "true"
       - key: EDGE_ALLOWED_ORIGINS
-        value: "*"
+        value: https://ichnoscope-wcc-30.vercel.app,http://localhost:3000
       - key: MAX_BODY_BYTES
         value: "51200"
       - key: READ_TIMEOUT_SECONDS
