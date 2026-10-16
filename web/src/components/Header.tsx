@@ -1,10 +1,12 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useTheme } from '@/lib/theme';
 import { api } from '@/lib/api';
+import { createClient } from '@/lib/supabase/client';
+import type { User } from '@supabase/supabase-js';
 import { ProjectSwitcher } from '@/components/ProjectSwitcher';
 import {
   Search,
@@ -35,6 +37,16 @@ export function Header({ currentTitle, onOpenSearch }: HeaderProps) {
   const [replayModalOpen, setReplayModalOpen] = useState(false);
   const [replaying, setReplaying] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+
+  useEffect(() => {
+    const supabase = createClient();
+    supabase.auth.getUser().then(({ data }) => setUser(data.user));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
 
   // Compute breadcrumb segments from pathname
   const pathParts = pathname.split('/').filter(Boolean);
@@ -167,16 +179,21 @@ export function Header({ currentTitle, onOpenSearch }: HeaderProps) {
           <div className="relative">
             <button
               onClick={() => setUserMenuOpen(!userMenuOpen)}
-              className="w-7 h-7 rounded-full bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-800 flex items-center justify-center font-bold text-xs hover:ring-2 hover:ring-purple-500/20 transition-all"
+              className="w-7 h-7 rounded-full bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-800 flex items-center justify-center font-bold text-xs hover:ring-2 hover:ring-purple-500/20 transition-all uppercase"
+              title={user?.email || 'User Account'}
             >
-              F
+              {user?.email?.[0]?.toUpperCase() || 'U'}
             </button>
 
             {userMenuOpen && (
-              <div className="absolute right-0 mt-2 w-48 rounded-lg bg-surface border border-border-subtle shadow-popover py-1 z-50 animate-in fade-in slide-in-from-top-1 text-xs">
+              <div className="absolute right-0 mt-2 w-52 rounded-lg bg-surface border border-border-subtle shadow-popover py-1 z-50 animate-in fade-in slide-in-from-top-1 text-xs">
                 <div className="px-3 py-2 border-b border-border-subtle font-medium">
-                  <div className="text-text-primary">SRE Operator</div>
-                  <div className="text-[11px] text-text-muted">admin@ichnoscope.local</div>
+                  <div className="text-text-primary truncate">
+                    {user?.user_metadata?.full_name || user?.user_metadata?.user_name || user?.email?.split('@')[0] || 'Authenticated User'}
+                  </div>
+                  <div className="text-[11px] text-text-muted truncate">
+                    {user?.email || 'Logged in'}
+                  </div>
                 </div>
                 <Link
                   href="/app/settings"
@@ -194,12 +211,13 @@ export function Header({ currentTitle, onOpenSearch }: HeaderProps) {
                 </Link>
                 <div className="border-t border-border-subtle my-1" />
                 <button
-                  onClick={() => {
-                    api.logout();
+                  onClick={async () => {
+                    const supabase = createClient();
+                    await supabase.auth.signOut();
                     setUserMenuOpen(false);
                     router.push('/login');
                   }}
-                  className="w-full text-left px-3 py-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-colors"
+                  className="w-full text-left px-3 py-1.5 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-colors font-medium"
                 >
                   Log out
                 </button>

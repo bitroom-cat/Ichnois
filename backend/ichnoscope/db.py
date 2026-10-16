@@ -247,11 +247,46 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             updated_at REAL NOT NULL
         );
         """,
+        """
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            user_id     TEXT PRIMARY KEY,
+            email       TEXT NOT NULL,
+            display_name TEXT,
+            avatar_url  TEXT,
+            created_at  REAL NOT NULL,
+            last_login  REAL
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS team_members (
+            id          TEXT PRIMARY KEY,
+            project_id  TEXT NOT NULL,
+            user_id     TEXT NOT NULL,
+            role        TEXT NOT NULL DEFAULT 'viewer',
+            invited_by  TEXT,
+            created_at  REAL NOT NULL,
+            UNIQUE(project_id, user_id)
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS team_audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id  TEXT NOT NULL,
+            actor_id    TEXT NOT NULL,
+            action      TEXT NOT NULL,
+            target_id   TEXT,
+            details     TEXT,
+            created_at  REAL NOT NULL
+        );
+        """,
         "CREATE INDEX IF NOT EXISTS idx_runs_updated ON runs (updated_at DESC);",
         "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs (status);",
         "CREATE INDEX IF NOT EXISTS idx_logs_run_id ON run_logs (run_id, timestamp);",
         "CREATE INDEX IF NOT EXISTS idx_gate_reviews_run ON gate_reviews (run_id, gate);",
         "CREATE INDEX IF NOT EXISTS idx_project_keys_public ON project_keys (public_key);",
+        "CREATE INDEX IF NOT EXISTS idx_team_members_project ON team_members (project_id);",
+        "CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members (user_id);",
+        "CREATE INDEX IF NOT EXISTS idx_team_audit_project ON team_audit_log (project_id, created_at DESC);",
     ]
 
     if turso_url and turso_token and db_path is None and DEFAULT_RUNS_DB == "ichnoscope_runs.db":
@@ -352,6 +387,50 @@ def migrate_to_v2(conn: Any) -> None:
             );
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id     TEXT PRIMARY KEY,
+                email       TEXT NOT NULL,
+                display_name TEXT,
+                avatar_url  TEXT,
+                created_at  REAL NOT NULL,
+                last_login  REAL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS team_members (
+                id          TEXT PRIMARY KEY,
+                project_id  TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                role        TEXT NOT NULL DEFAULT 'viewer',
+                invited_by  TEXT,
+                created_at  REAL NOT NULL,
+                UNIQUE(project_id, user_id)
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS team_audit_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id  TEXT NOT NULL,
+                actor_id    TEXT NOT NULL,
+                action      TEXT NOT NULL,
+                target_id   TEXT,
+                details     TEXT,
+                created_at  REAL NOT NULL
+            );
+            """
+        )
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_team_members_project ON team_members (project_id);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members (user_id);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_team_audit_project ON team_audit_log (project_id, created_at DESC);")
+        except Exception:
+            pass
     except Exception as exc:  # noqa: BLE001
         logger.debug("Auxiliary table create skipped: %s", exc)
 

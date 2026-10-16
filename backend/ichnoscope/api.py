@@ -662,3 +662,121 @@ def api_internal_projects_cache() -> dict[str, Any]:
             }
     return {"projects": cache, "count": len(cache)}
 
+
+# ---------------------------------------------------------------------------
+# Team Membership & Role Management Endpoints
+# ---------------------------------------------------------------------------
+
+class TeamMemberAddRequest(BaseModel):
+    user_id: str
+    email: str = ""
+    display_name: str = ""
+    role: str = "viewer"
+
+
+class TeamMemberUpdateRequest(BaseModel):
+    role: str
+
+
+class UserProfileSyncRequest(BaseModel):
+    user_id: str
+    email: str
+    display_name: str = ""
+    avatar_url: str = ""
+
+
+@router.post("/user/sync")
+def api_sync_user_profile(req: UserProfileSyncRequest) -> dict[str, Any]:
+    """Upsert user profile from Supabase claims upon authentication."""
+    from ichnoscope.teams import upsert_user_profile
+
+    upsert_user_profile(
+        user_id=req.user_id,
+        email=req.email,
+        display_name=req.display_name or None,
+        avatar_url=req.avatar_url or None,
+    )
+    return {"status": "synced", "user_id": req.user_id}
+
+
+@router.get("/user/{user_id}/projects")
+def api_get_user_projects(user_id: str) -> dict[str, Any]:
+    """Retrieve all projects accessible to a user along with their granted role."""
+    from ichnoscope.teams import get_user_projects
+
+    projects = get_user_projects(user_id)
+    return {"projects": projects, "count": len(projects)}
+
+
+@router.get("/projects/{project_id}/members")
+def api_get_project_members(project_id: str) -> dict[str, Any]:
+    """List all team members assigned to a project."""
+    from ichnoscope.teams import get_project_members
+
+    members = get_project_members(project_id)
+    return {"project_id": project_id, "members": members, "count": len(members)}
+
+
+@router.post("/projects/{project_id}/members")
+def api_add_project_member(project_id: str, req: TeamMemberAddRequest) -> dict[str, Any]:
+    """Add or invite a member to a project with a specific role."""
+    from ichnoscope.teams import add_team_member, upsert_user_profile
+
+    if req.email:
+        upsert_user_profile(
+            user_id=req.user_id,
+            email=req.email,
+            display_name=req.display_name or None,
+        )
+
+    member = add_team_member(
+        project_id=project_id,
+        user_id=req.user_id,
+        role=req.role,
+        invited_by="admin",
+    )
+    return {"status": "added", "member": member}
+
+
+@router.patch("/projects/{project_id}/members/{user_id}")
+def api_update_project_member(
+    project_id: str, user_id: str, req: TeamMemberUpdateRequest
+) -> dict[str, Any]:
+    """Update a team member's role within a project."""
+    from ichnoscope.teams import update_member_role
+
+    try:
+        updated = update_member_role(
+            project_id=project_id,
+            user_id=user_id,
+            new_role=req.role,
+            actor_id="admin",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Member '{user_id}' not found in project '{project_id}'",
+        )
+    return {"status": "updated", "member": updated}
+
+
+@router.delete("/projects/{project_id}/members/{user_id}")
+def api_remove_project_member(project_id: str, user_id: str) -> dict[str, Any]:
+    """Remove a team member from a project."""
+    from ichnoscope.teams import remove_team_member
+
+    ok = remove_team_member(
+        project_id=project_id,
+        user_id=user_id,
+        actor_id="admin",
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Member '{user_id}' not found in project '{project_id}'",
+        )
+    return {"status": "removed", "project_id": project_id, "user_id": user_id}
+

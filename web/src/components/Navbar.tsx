@@ -28,11 +28,11 @@ export function Navbar() {
   const [isAuth, setIsAuth] = useState(false);
 
   useEffect(() => {
-    setIsAuth(api.isAuthenticated());
+    api.isAuthenticated().then(setIsAuth);
   }, [pathname]);
 
-  const handleLogout = () => {
-    api.logout();
+  const handleLogout = async () => {
+    await api.logout();
     setIsAuth(false);
     router.push('/login');
   };

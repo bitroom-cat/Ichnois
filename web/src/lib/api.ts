@@ -203,11 +203,30 @@ export function setAdminToken(token: string) {
 }
 
 export async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
-  const token = getAdminToken();
   const headers = new Headers(init.headers || {});
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`);
+
+  // Try to get Supabase session token
+  if (typeof window !== 'undefined' && !headers.has('Authorization')) {
+    try {
+      const { createClient } = await import('@/lib/supabase/client');
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.access_token) {
+        headers.set('Authorization', `Bearer ${session.access_token}`);
+      }
+    } catch {
+      // Ignore if supabase client cannot initialize
+    }
   }
+
+  // Fallback to legacy admin token if no Authorization header was set
+  if (!headers.has('Authorization')) {
+    const token = getAdminToken();
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+  }
+
   return fetch(url, { ...init, headers });
 }
 
@@ -947,17 +966,29 @@ export const api = {
     return { ok: true, message: data.message || 'Test notification delivered to Slack successfully!' };
   },
 
-  isAuthenticated: (): boolean => {
+  isAuthenticated: async (): Promise<boolean> => {
     if (typeof window === 'undefined') return true;
-    return document.cookie.includes('ichnoscope_admin_auth=true');
+    try {
+      const { createClient } = await import('@/lib/supabase/client');
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      return !!user;
+    } catch {
+      return false;
+    }
   },
 
-  login: (password: string): boolean => {
-    return password === 'ichnoscope' || password === 'admin';
-  },
+  login: (_password: string): boolean => false,
 
-  logout: (): void => {
+  logout: async (): Promise<void> => {
     if (typeof window !== 'undefined') {
+      try {
+        const { createClient } = await import('@/lib/supabase/client');
+        const supabase = createClient();
+        await supabase.auth.signOut();
+      } catch {
+        // Fallback
+      }
       document.cookie = 'ichnoscope_admin_auth=; Max-Age=0; path=/;';
     }
   },

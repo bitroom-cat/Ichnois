@@ -49,32 +49,49 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
         if not path.startswith("/api"):
             return await call_next(request)
 
+        # Try Supabase JWT first, then legacy admin token
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
+
+        supabase_secret = os.environ.get("SUPABASE_JWT_SECRET", "")
+        if supabase_secret and token:
+            try:
+                import jwt as pyjwt
+                pyjwt.decode(
+                    token,
+                    supabase_secret,
+                    algorithms=["HS256"],
+                    audience="authenticated",
+                    options={"verify_exp": True},
+                )
+                return await call_next(request)  # Valid Supabase JWT
+            except Exception:
+                pass  # Not a valid Supabase JWT, fall through to legacy admin token
+
+        # Legacy admin token check (existing behavior — fallback during migration)
         settings = get_settings()
         admin_token = settings.admin_token.get_secret_value() if settings.admin_token else None
 
-        # If admin_token is configured, strictly enforce Bearer token
         if admin_token:
-            auth_header = request.headers.get("Authorization")
-            if not auth_header:
+            if not token:
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "Missing Authorization header with Bearer token for Dashboard API"},
                 )
-
-            token = auth_header.replace("Bearer ", "").strip()
             if not hmac.compare_digest(token, admin_token):
-                logger.warning("Unauthorized access attempt to %s with invalid admin token", path)
+                logger.warning("Unauthorized access attempt to %s with invalid token", path)
                 return JSONResponse(
                     status_code=401,
-                    content={"detail": "Invalid Admin Bearer token"},
+                    content={"detail": "Invalid Bearer token"},
                 )
         else:
-            enforce_strict = os.getenv("ENFORCE_ADMIN_TOKEN", "false").lower() == "true"
-            if enforce_strict:
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "ADMIN_TOKEN is required but not configured"},
-                )
+            if not supabase_secret:
+                enforce_strict = os.getenv("ENFORCE_ADMIN_TOKEN", "false").lower() == "true"
+                if enforce_strict:
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "ADMIN_TOKEN or SUPABASE_JWT_SECRET required but not configured"},
+                    )
 
         return await call_next(request)
 
