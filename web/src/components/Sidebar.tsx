@@ -1,25 +1,24 @@
-'use client';
+﻿'use client';
 
-import React, { useState } from 'react';
+import React from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
+import { useWorkspace } from '@/context/WorkspaceContext';
 import {
   Globe,
   Activity,
   Settings,
-  Radio,
-  Terminal,
   ShieldCheck,
   Layers,
-  Key,
-  PlayCircle,
-  FileText,
-  BookOpen,
   ChevronLeft,
   ChevronRight,
   ExternalLink,
   Flame,
   CheckCircle2,
+  FolderKanban,
+  GitPullRequest,
+  ArrowLeft,
+  Terminal,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -32,52 +31,89 @@ interface SidebarProps {
 export function Sidebar({
   collapsed = false,
   onToggleCollapse,
-  serviceName = 'automation-api',
-  environment = 'production',
 }: SidebarProps) {
   const pathname = usePathname();
+  const router = useRouter();
+  const { currentWorkspace, isGlobal, activeProject, projects, metrics, selectWorkspace } = useWorkspace();
 
   const isCurrent = (path: string) => {
+    if (path.includes('?')) {
+      const basePath = path.split('?')[0];
+      return pathname === basePath;
+    }
     if (path === '/app/runs') {
-      return pathname.startsWith('/app/runs');
+      return pathname === '/app/runs';
     }
     return pathname.startsWith(path);
   };
 
-  const navSectionMain = [
+  const globalNavMain = [
+    {
+      href: '/app/overview',
+      label: 'Fleet Overview',
+      shortLabel: 'Overview',
+      icon: <Globe className="w-4 h-4 shrink-0" />,
+      badge: 'HQ',
+    },
     {
       href: '/app/runs',
-      label: 'Deploys & Incidents',
-      shortLabel: 'Deploys',
+      label: 'Fleet Incidents',
+      shortLabel: 'Incidents',
       icon: <Activity className="w-4 h-4 shrink-0" />,
-      badge: 'Live',
+      badge: metrics?.total_runs ? `${metrics.total_runs}` : 'Live',
     },
     {
       href: '/app/projects',
-      label: 'Projects & DSNs',
-      shortLabel: 'Projects',
+      label: 'Microservices',
+      shortLabel: 'Services',
       icon: <Layers className="w-4 h-4 shrink-0" />,
+      badge: `${projects.length}`,
     },
     {
       href: '/app/settings',
-      label: 'Settings',
+      label: 'Platform Settings',
       shortLabel: 'Settings',
       icon: <Settings className="w-4 h-4 shrink-0" />,
     },
   ];
 
-  const navSectionMonitor = [
+  const projectNavMain = [
     {
-      href: '/app/runs',
-      label: 'Events & Triage',
-      shortLabel: 'Events',
-      icon: <Flame className="w-4 h-4 shrink-0" />,
+      href: `/app/projects/${currentWorkspace}`,
+      label: 'Service Hub',
+      shortLabel: 'Hub',
+      icon: <FolderKanban className="w-4 h-4 shrink-0" />,
+      badge: 'Active',
     },
     {
+      href: `/app/runs?project=${currentWorkspace}`,
+      label: 'Incidents Queue',
+      shortLabel: 'Incidents',
+      icon: <Flame className="w-4 h-4 shrink-0" />,
+      badge: metrics?.staged_raw_count ? `${metrics.staged_raw_count} new` : undefined,
+    },
+    {
+      href: '/app/projects',
+      label: 'All Microservices',
+      shortLabel: 'Fleet',
+      icon: <Layers className="w-4 h-4 shrink-0" />,
+    },
+    {
+      href: `/app/settings?project=${currentWorkspace}`,
+      label: 'Service Settings',
+      shortLabel: 'Settings',
+      icon: <Settings className="w-4 h-4 shrink-0" />,
+    },
+  ];
+
+  const navSectionMain = isGlobal ? globalNavMain : projectNavMain;
+
+  const globalNavMonitor = [
+    {
       href: '/app/runs',
-      label: 'Logs Console',
-      shortLabel: 'Logs',
-      icon: <Terminal className="w-4 h-4 shrink-0" />,
+      label: 'Dual-Gate Triage',
+      shortLabel: 'Triage',
+      icon: <Flame className="w-4 h-4 shrink-0" />,
     },
     {
       href: '/app/connections',
@@ -87,20 +123,28 @@ export function Sidebar({
     },
   ];
 
-  const navSectionManage = [
+  const projectNavMonitor = [
+    {
+      href: `/app/runs?project=${currentWorkspace}&status=staged_raw`,
+      label: 'Gate 1: Raw Queue',
+      shortLabel: 'Gate 1',
+      icon: <Flame className="w-4 h-4 shrink-0" />,
+    },
+    {
+      href: `/app/runs?project=${currentWorkspace}&status=staged_draft`,
+      label: 'Gate 2: Drafts',
+      shortLabel: 'Gate 2',
+      icon: <GitPullRequest className="w-4 h-4 shrink-0" />,
+    },
     {
       href: '/app/connections',
-      label: 'Connections',
-      shortLabel: 'Connect',
-      icon: <Layers className="w-4 h-4 shrink-0" />,
-    },
-    {
-      href: '/app/settings',
-      label: 'Environment & Secrets',
-      shortLabel: 'Env',
-      icon: <Key className="w-4 h-4 shrink-0" />,
+      label: 'System Health',
+      shortLabel: 'Health',
+      icon: <ShieldCheck className="w-4 h-4 shrink-0" />,
     },
   ];
+
+  const navSectionMonitor = isGlobal ? globalNavMonitor : projectNavMonitor;
 
   return (
     <aside
@@ -108,37 +152,55 @@ export function Sidebar({
         collapsed ? 'w-16' : 'w-60'
       }`}
     >
-      {/* Service Context Header */}
+      {/* Workspace Context Header */}
       <div className="p-3 border-b border-border-subtle">
         {!collapsed ? (
           <div>
-            <Link
-              href="/app/runs"
-              className="inline-flex items-center gap-1.5 text-xs text-text-muted hover:text-text-primary transition-colors mb-1.5"
-            >
-              <span>← Environment</span>
-            </Link>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className="w-7 h-7 rounded-md bg-canvas border border-border-subtle flex items-center justify-center text-text-primary shrink-0">
-                  <Globe className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+            {!isGlobal ? (
+              <button
+                type="button"
+                onClick={() => {
+                  selectWorkspace('global');
+                  router.push('/app/overview');
+                }}
+                className="inline-flex items-center gap-1.5 text-xs text-text-muted hover:text-purple-600 dark:hover:text-purple-400 transition-colors mb-2 font-medium group"
+              >
+                <ArrowLeft className="w-3 h-3 group-hover:-translate-x-0.5 transition-transform" />
+                <span>Switch to Fleet</span>
+              </button>
+            ) : (
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">
+                Global Workspace
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 min-w-0">
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border ${
+                isGlobal
+                  ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20'
+                  : 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20'
+              }`}>
+                {isGlobal ? <Globe className="w-4 h-4" /> : <FolderKanban className="w-4 h-4" />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="font-bold text-xs text-text-primary truncate">
+                  {isGlobal ? 'Fleet Operations' : activeProject?.name || currentWorkspace}
                 </div>
-                <div className="min-w-0">
-                  <div className="font-semibold text-sm text-text-primary truncate">
-                    {serviceName}
-                  </div>
-                  <div className="flex items-center gap-1.5 text-xs text-text-muted font-mono">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                    <span>{environment}</span>
-                  </div>
+                <div className="flex items-center gap-1 text-[11px] text-text-muted font-mono truncate">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                  <span className="truncate">{isGlobal ? `${projects.length} microservices` : (activeProject?.environment || 'production')}</span>
                 </div>
               </div>
             </div>
           </div>
         ) : (
           <div className="flex justify-center py-1">
-            <div className="w-8 h-8 rounded-md bg-canvas border border-border-subtle flex items-center justify-center">
-              <Globe className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+            <div className="w-8 h-8 rounded-lg bg-canvas border border-border-subtle flex items-center justify-center">
+              {isGlobal ? (
+                <Globe className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+              ) : (
+                <FolderKanban className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+              )}
             </div>
           </div>
         )}
@@ -166,7 +228,7 @@ export function Sidebar({
                   <>
                     <span className="flex-1 truncate">{item.label}</span>
                     {item.badge && (
-                      <span className="px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300">
+                      <span className="px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-purple-500/10 text-purple-600 dark:text-purple-400">
                         {item.badge}
                       </span>
                     )}
@@ -181,32 +243,10 @@ export function Sidebar({
         <div className="space-y-0.5">
           {!collapsed && (
             <div className="px-2.5 text-[10px] font-semibold text-text-muted uppercase tracking-wider mb-1">
-              Monitor
+              {isGlobal ? 'Fleet Monitor' : 'Service Monitor'}
             </div>
           )}
           {navSectionMonitor.map((item) => {
-            return (
-              <Link
-                key={item.label}
-                href={item.href}
-                className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-text-secondary hover:text-text-primary hover:bg-hover transition-colors"
-                title={collapsed ? item.label : undefined}
-              >
-                {item.icon}
-                {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
-              </Link>
-            );
-          })}
-        </div>
-
-        {/* Manage Section */}
-        <div className="space-y-0.5">
-          {!collapsed && (
-            <div className="px-2.5 text-[10px] font-semibold text-text-muted uppercase tracking-wider mb-1">
-              Manage
-            </div>
-          )}
-          {navSectionManage.map((item) => {
             return (
               <Link
                 key={item.label}
@@ -230,7 +270,7 @@ export function Sidebar({
               href="/app/connections"
               className="flex items-center justify-between px-2.5 py-1.5 rounded text-text-muted hover:text-text-primary hover:bg-hover transition-colors"
             >
-              <span className="flex items-center gap-2">
+              <span className="flex items-center gap-2 text-xs">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
                 <span>All systems normal</span>
               </span>
@@ -241,9 +281,9 @@ export function Sidebar({
               rel="noreferrer"
               className="flex items-center justify-between px-2.5 py-1.5 rounded text-text-muted hover:text-text-primary hover:bg-hover transition-colors"
             >
-              <span className="flex items-center gap-2">
-                <BookOpen className="w-3.5 h-3.5" />
-                <span>Documentation</span>
+              <span className="flex items-center gap-2 text-xs">
+                <Terminal className="w-3.5 h-3.5" />
+                <span>v2.1 Architecture</span>
               </span>
               <ExternalLink className="w-3 h-3 text-text-muted" />
             </a>
@@ -258,10 +298,10 @@ export function Sidebar({
           {collapsed ? (
             <ChevronRight className="w-4 h-4" />
           ) : (
-            <>
-              <ChevronLeft className="w-4 h-4" />
+            <div className="flex items-center gap-1.5">
+              <ChevronLeft className="w-3.5 h-3.5" />
               <span>Collapse</span>
-            </>
+            </div>
           )}
         </button>
       </div>

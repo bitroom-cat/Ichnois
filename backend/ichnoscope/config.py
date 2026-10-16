@@ -383,10 +383,10 @@ def get_settings() -> Settings:
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(override=True)
         root_dir = Path(__file__).resolve().parents[2]
-        load_dotenv(root_dir / "backend" / ".env")
-        load_dotenv(root_dir / ".env")
+        load_dotenv(root_dir / "backend" / ".env", override=True)
+        load_dotenv(root_dir / ".env", override=True)
     except ImportError:
         pass
     return load_settings(os.environ)

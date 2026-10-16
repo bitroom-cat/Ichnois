@@ -163,9 +163,18 @@ def get_db(db_path: str | Path | None = None) -> Iterator[Any]:
             yield conn
 
 
-def init_db(db_path: str | Path | None = None) -> Path | str:
-    """Initialize database tables for runs, execution logs, and incident deduplication."""
+_INITIALIZED_DBS: set[str] = set()
+
+
+def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | str:
+    """Initialize database tables for runs, execution logs, and incident deduplication once per process."""
+    global _INITIALIZED_DBS
     turso_url = os.environ.get("TURSO_DATABASE_URL") or os.environ.get("TURSO_DB_URL") or os.environ.get("LIBSQL_URL")
+    turso_token = os.environ.get("TURSO_AUTH_TOKEN") or os.environ.get("TURSO_TOKEN") or os.environ.get("LIBSQL_AUTH_TOKEN")
+
+    cache_key = f"turso:{turso_url}" if (turso_url and turso_token and db_path is None) else str(db_path or "local")
+    if not force and cache_key in _INITIALIZED_DBS:
+        return turso_url if (turso_url and turso_token and db_path is None) else get_db_path(db_path)
     turso_token = os.environ.get("TURSO_AUTH_TOKEN") or os.environ.get("TURSO_TOKEN") or os.environ.get("LIBSQL_AUTH_TOKEN")
 
     tables = [
@@ -180,6 +189,7 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             draft_title TEXT,
             draft_body TEXT,
             raw_payload TEXT,
+            project_id TEXT,
             state_json TEXT NOT NULL,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
@@ -238,6 +248,10 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             slack_channel_override TEXT,
             github_installation_id TEXT,
             github_repo TEXT,
+            description TEXT,
+            webhook_url TEXT,
+            updated_at REAL,
+            owner_id TEXT,
             is_active INTEGER DEFAULT 1,
             created_at REAL NOT NULL
         );
@@ -296,6 +310,7 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             for stmt in tables:
                 conn.execute(stmt)
             migrate_to_v2(conn)
+        _INITIALIZED_DBS.add(cache_key)
         return turso_url
 
     path = get_db_path(db_path)
@@ -304,6 +319,7 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             conn.execute(stmt)
         migrate_to_v2(conn)
         conn.commit()
+    _INITIALIZED_DBS.add(cache_key)
     return path
 
 
@@ -316,6 +332,7 @@ def migrate_to_v2(conn: Any) -> None:
         "draft_title": "TEXT",
         "draft_body": "TEXT",
         "raw_payload": "TEXT",
+        "project_id": "TEXT",
     }
     existing: set[str] = set()
     try:
@@ -332,6 +349,10 @@ def migrate_to_v2(conn: Any) -> None:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {col_type};")
         except Exception as exc:  # noqa: BLE001
             logger.debug("Skipping ALTER TABLE for %s: %s", name, exc)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_project ON runs (project_id, status);")
+    except Exception:
+        pass
 
     try:
         conn.execute(
@@ -375,7 +396,7 @@ def migrate_to_v2(conn: Any) -> None:
             );
             """
         )
-        for col in ["github_repo_override", "slack_channel_override", "github_installation_id", "github_repo"]:
+        for col in ["github_repo_override", "slack_channel_override", "github_installation_id", "github_repo", "description", "webhook_url", "updated_at", "owner_id"]:
             try:
                 conn.execute(f"ALTER TABLE project_keys ADD COLUMN {col} TEXT;")
             except Exception:

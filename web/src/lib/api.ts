@@ -83,6 +83,8 @@ export interface PolicyDocument {
 export interface Project {
   project_id: string;
   name: string;
+  description?: string;
+  webhook_url?: string;
   public_key: string;
   secret_key?: string;
   rate_limit_min: number;
@@ -93,6 +95,34 @@ export interface Project {
   github_repo?: string | null;
   is_active: boolean;
   created_at: number;
+  updated_at?: number;
+}
+
+export interface ProjectSummary {
+  project_id: string;
+  name: string;
+  description?: string;
+  github_repo?: string | null;
+  total_runs: number;
+  open_p1_count: number;
+  open_p2_count: number;
+  staged_raw_count: number;
+  staged_draft_count: number;
+  status: 'healthy' | 'degraded' | 'critical';
+  health_score: number;
+  last_incident_time?: string | null;
+}
+
+export interface WorkspaceMetrics {
+  total_runs: number;
+  staged_raw_count: number;
+  staged_draft_count: number;
+  published_count: number;
+  dismissed_count: number;
+  active_projects_count: number;
+  incident_rate_per_min: number;
+  project_id: string;
+  projects?: ProjectSummary[];
 }
 
 export interface GitHubRepo {
@@ -204,11 +234,13 @@ export const USE_MOCK_API = false; // Primary live mode with automatic fallback
 const STORAGE_KEY = 'ichnoscope_runs_v2';
 
 export function getAdminToken(): string | null {
+  const envToken = process.env.NEXT_PUBLIC_ADMIN_TOKEN;
+  if (envToken) return envToken;
   if (typeof window !== 'undefined') {
     const local = localStorage.getItem('ichnoscope_admin_token');
     if (local) return local;
   }
-  return process.env.NEXT_PUBLIC_ADMIN_TOKEN || null;
+  return null;
 }
 
 export function setAdminToken(token: string) {
@@ -219,8 +251,10 @@ export function setAdminToken(token: string) {
 
 export async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers || {});
+  const adminToken = getAdminToken();
 
-  // Try to get Supabase session token
+  // Try to get Supabase user session token first for user-isolated access
+  let hasUserSession = false;
   if (typeof window !== 'undefined' && !headers.has('Authorization')) {
     try {
       const { createClient } = await import('@/lib/supabase/client');
@@ -228,17 +262,18 @@ export async function apiFetch(url: string, init: RequestInit = {}): Promise<Res
       const { data: { session } } = await supabase.auth.getSession();
       if (session?.access_token) {
         headers.set('Authorization', `Bearer ${session.access_token}`);
+        hasUserSession = true;
       }
     } catch {
       // Ignore if supabase client cannot initialize
     }
   }
 
-  // Fallback to legacy admin token if no Authorization header was set
-  if (!headers.has('Authorization')) {
-    const token = getAdminToken();
-    if (token) {
-      headers.set('Authorization', `Bearer ${token}`);
+  // Only fallback to admin token if no authenticated user session was found
+  if (!hasUserSession && !headers.has('Authorization') && adminToken) {
+    headers.set('Authorization', `Bearer ${adminToken}`);
+    if (!headers.has('X-Admin-Token')) {
+      headers.set('X-Admin-Token', adminToken);
     }
   }
 
@@ -357,17 +392,12 @@ function formatBackendRun(b: any): RunItem {
 }
 
 function getStoredRuns(): RunDetail[] {
-  if (typeof window === 'undefined') return MOCK_RUNS;
-  try {
-    const data = localStorage.getItem(STORAGE_KEY);
-    if (!data) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(MOCK_RUNS));
-      return MOCK_RUNS;
-    }
-    return JSON.parse(data);
-  } catch {
-    return MOCK_RUNS;
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {}
   }
+  return [];
 }
 
 function saveStoredRuns(runs: RunDetail[]) {
@@ -529,14 +559,10 @@ export const api = {
         }
       }
     } catch {
-      // Backend not running; fallback to local storage
+      // Backend not running
     }
 
-    const runs = getStoredRuns();
-    const filtered = projectId && projectId !== 'all'
-      ? runs.filter((r) => r.project_id === projectId || r.projectId === projectId)
-      : runs;
-    return filtered.map(toRunItem);
+    return [];
   },
 
   getRunById: async (id: string): Promise<any | null> => {
@@ -547,13 +573,10 @@ export const api = {
         return formatBackendRun(data);
       }
     } catch {
-      // Backend not running; fallback to local storage
+      // Backend not running
     }
 
-    const runs = getStoredRuns();
-    const r = runs.find((item) => item.id === id);
-    if (!r) return null;
-    return toRunItem(r);
+    return null;
   },
 
   approveRun: async (id: string): Promise<any> => {
@@ -1045,18 +1068,7 @@ export const api = {
     } catch {
       // Fallback
     }
-    return [
-      {
-        project_id: 'proj_default',
-        name: 'Default Application',
-        public_key: 'sentry_public_key',
-        secret_key: 'sk_live_default_...',
-        rate_limit_min: 120,
-        environment: 'production',
-        is_active: true,
-        created_at: Date.now() / 1000,
-      },
-    ];
+    return [];
   },
 
   createProject: async (payload: ProjectCreateInput): Promise<Project> => {
@@ -1123,6 +1135,32 @@ export const api = {
       throw new Error(err.detail || 'Failed to link GitHub repository');
     }
     return res.json();
+  },
+
+  getWorkspaceMetrics: async (projectId?: string): Promise<WorkspaceMetrics> => {
+    try {
+      const targetProj = projectId && projectId !== 'all' && projectId !== 'global' ? projectId : undefined;
+      const url = targetProj
+        ? `${BACKEND_URL}/api/workspace/metrics?project_id=${encodeURIComponent(targetProj)}`
+        : `${BACKEND_URL}/api/workspace/metrics`;
+      const res = await apiFetch(url, { cache: 'no-store' });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // Fallback
+    }
+    return {
+      total_runs: 0,
+      staged_raw_count: 0,
+      staged_draft_count: 0,
+      published_count: 0,
+      dismissed_count: 0,
+      active_projects_count: 1,
+      incident_rate_per_min: 0,
+      project_id: projectId || 'ALL_PROJECTS',
+      projects: [],
+    };
   },
 
   disconnectGitHubRepo: async (projectId: string): Promise<Project> => {

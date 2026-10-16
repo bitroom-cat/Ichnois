@@ -42,38 +42,89 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # 2. Allow exempt public paths or internal gateway routes (which have dedicated HMAC auth)
-        if path in self.EXEMPT_PATHS or path.startswith("/internal/v1/"):
-            return await call_next(request)
-
-        # 3. Only intercept /api/* routes
+        if path in self.EXEMPT_PATHS or path.startswith("/internal/v1/") or "/store" in path or "/envelope" in path:
+            return await call_next(request)        # 3. Only intercept /api/* routes
         if not path.startswith("/api"):
             return await call_next(request)
 
-        # Try Supabase JWT first, then legacy admin token
         auth_header = request.headers.get("Authorization", "")
         token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
+        x_admin_token = request.headers.get("X-Admin-Token", "").strip()
 
-        supabase_secret = os.environ.get("SUPABASE_JWT_SECRET", "")
-        if supabase_secret and token:
-            try:
-                import jwt as pyjwt
-                pyjwt.decode(
-                    token,
-                    supabase_secret,
-                    algorithms=["HS256"],
-                    audience="authenticated",
-                    options={"verify_exp": True},
-                )
-                return await call_next(request)  # Valid Supabase JWT
-            except Exception:
-                pass  # Not a valid Supabase JWT, fall through to legacy admin token
-
-        # Legacy admin token check (existing behavior — fallback during migration)
         settings = get_settings()
-        admin_token = settings.admin_token.get_secret_value() if settings.admin_token else None
+        admin_token = (
+            (settings.admin_token.get_secret_value() if settings.admin_token else None)
+            or os.environ.get("ADMIN_TOKEN")
+            or os.environ.get("NEXT_PUBLIC_ADMIN_TOKEN")
+        )
 
-        if admin_token and token and hmac.compare_digest(token, admin_token):
-            return await call_next(request)  # Valid legacy admin token
+        # 1. Supabase JWT Check (Prioritize user session if Bearer token starts with ey)
+        supabase_secret = os.environ.get("SUPABASE_JWT_SECRET", "").strip()
+        supabase_url = os.environ.get("SUPABASE_URL", "").strip()
+        supabase_anon = os.environ.get("SUPABASE_ANON_KEY", "").strip()
+
+        if token and token.startswith("ey"):
+            verified_user = None
+            if supabase_secret:
+                try:
+                    import jwt as pyjwt
+                    try:
+                        claims = pyjwt.decode(
+                            token,
+                            supabase_secret,
+                            algorithms=["HS256"],
+                            audience="authenticated",
+                            options={"verify_exp": True},
+                        )
+                        verified_user = {"id": claims.get("sub"), "email": claims.get("email")}
+                    except pyjwt.InvalidAudienceError:
+                        claims = pyjwt.decode(
+                            token,
+                            supabase_secret,
+                            algorithms=["HS256"],
+                            options={"verify_aud": False, "verify_exp": True},
+                        )
+                        verified_user = {"id": claims.get("sub"), "email": claims.get("email")}
+                except Exception as exc:
+                    logger.debug("Local Supabase JWT validation error: %s", exc)
+
+            if not verified_user and supabase_url:
+                try:
+                    import httpx
+                    verify_endpoint = supabase_url.rstrip("/") + "/auth/v1/user"
+                    async with httpx.AsyncClient(timeout=4.0) as http_client:
+                        resp = await http_client.get(
+                            verify_endpoint,
+                            headers={
+                                "Authorization": f"Bearer {token}",
+                                "apikey": supabase_anon or token,
+                            },
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            verified_user = {"id": data.get("id"), "email": data.get("email")}
+                except Exception as exc:
+                    logger.debug("Live Supabase token verification failed: %s", exc)
+
+            if verified_user:
+                request.state.is_admin = False
+                request.state.user_id = verified_user.get("id")
+                request.state.user_email = verified_user.get("email")
+                return await call_next(request)
+
+        # 2. Admin Token Check (Direct Bearer or X-Admin-Token header)
+        if admin_token:
+            clean_expected = admin_token.strip()
+            if token and hmac.compare_digest(token, clean_expected):
+                request.state.is_admin = True
+                request.state.user_id = None
+                request.state.user_email = "admin@ichnoscope.internal"
+                return await call_next(request)
+            if (not token or not token.startswith("ey")) and x_admin_token and hmac.compare_digest(x_admin_token, clean_expected):
+                request.state.is_admin = True
+                request.state.user_id = None
+                request.state.user_email = "admin@ichnoscope.internal"
+                return await call_next(request)
 
         # If either auth mechanism is configured and no valid token was provided:
         if supabase_secret or admin_token:
@@ -82,7 +133,7 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
                     status_code=401,
                     content={"detail": "Missing Authorization header with Bearer token for Dashboard API"},
                 )
-            logger.warning("Unauthorized access attempt to %s with invalid token", path)
+            logger.warning("Unauthorized access attempt to %s: received token len=%d prefix=%s, expected admin_token prefix=%s", path, len(token), token[:10] if token else "EMPTY", admin_token[:10] if admin_token else "NONE")
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Invalid or expired Bearer token"},
@@ -165,6 +216,35 @@ async def sentry_webhook(
     # Enqueue background task and reply 200 immediately (Stage 1 ingestion & dispatch)
     bg.add_task(ingest_incident, payload)
     return {"status": "accepted"}
+
+
+@app.post("/api/{project_id}/store/")
+@app.post("/api/{project_id}/envelope/")
+async def project_scoped_sentry_ingress(
+    project_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    """Ingest Sentry error telemetry scoped to a specific microservice project."""
+    body = await request.body()
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        payload = {"raw": body.decode("utf-8", errors="replace")}
+
+    settings = get_settings()
+    run_id, state, auto_promoted = ingest_incident(
+        payload=payload,
+        settings=settings,
+        project_id=project_id,
+        apply_policy=True,
+    )
+    return {
+        "id": run_id,
+        "run_id": run_id,
+        "project_id": project_id,
+        "status": state.status,
+        "auto_promoted": auto_promoted,
+    }
 
 
 @app.post("/internal/v1/incidents/ingress")
