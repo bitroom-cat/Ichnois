@@ -3,7 +3,20 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { updateSession } from '@/lib/supabase/middleware';
 
 export async function middleware(request: NextRequest) {
-  const { pathname } = request.nextUrl;
+  const { pathname, searchParams } = request.nextUrl;
+
+  // If an OAuth code arrives on any page (e.g. Supabase default Site URL fallback to "/"),
+  // immediately forward it to /auth/callback so it gets exchanged for session cookies
+  if (searchParams.has('code')) {
+    const callbackUrl = new URL('/auth/callback', request.url);
+    searchParams.forEach((val, key) => {
+      callbackUrl.searchParams.set(key, val);
+    });
+    if (!callbackUrl.searchParams.has('next')) {
+      callbackUrl.searchParams.set('next', '/app/runs');
+    }
+    return NextResponse.redirect(callbackUrl);
+  }
 
   const { user, supabaseResponse } = await updateSession(request);
 
