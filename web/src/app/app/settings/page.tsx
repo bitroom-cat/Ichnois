@@ -517,7 +517,7 @@ function SettingsContent() {
                     </span>
                   </div>
                   <p className="text-xs text-text-secondary mt-0.5">
-                    Route incidents and Gate 2 triage notifications directly to <strong>{selectedProject.name}</strong>'s team channel.
+                    Route incidents and Gate 2 triage notifications directly to <strong>{selectedProject.name}</strong>&apos;s team channel.
                   </p>
                 </div>
 
