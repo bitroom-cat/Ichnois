@@ -559,6 +559,11 @@ def api_replay_fixture(fixture: str = "payment_npe") -> dict[str, Any]:
     return api_get_run(run_id)
 
 
+class GitHubConnectRequest(BaseModel):
+    installation_id: str | int
+    repo: str
+
+
 class ProjectCreateRequest(BaseModel):
     name: str
     environment: str = "production"
@@ -642,6 +647,67 @@ def api_rotate_project_key(project_id: str) -> dict[str, Any]:
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     return project.model_dump()
+
+
+@router.get("/projects/{project_id}/github/install-url")
+def api_get_github_install_url(project_id: str) -> dict[str, Any]:
+    """Return GitHub App installation URL for linking a repository."""
+    from ichnoscope.config import get_settings
+    settings = get_settings()
+    app_name = settings.github_app_name or os.getenv("GITHUB_APP_NAME") or "ichnois-connection"
+    install_url = f"https://github.com/apps/{app_name}/installations/new?state={project_id}"
+    return {
+        "install_url": install_url,
+        "app_name": app_name,
+        "project_id": project_id,
+    }
+
+
+@router.get("/projects/{project_id}/github/repos")
+def api_list_github_repos(project_id: str, installation_id: str | None = None) -> list[dict[str, Any]]:
+    """List accessible GitHub repositories for a project or installation."""
+    from ichnoscope.github_app import get_github_app_service, GitHubAppError
+    from ichnoscope.projects import get_project
+
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+
+    target_inst = installation_id or project.github_installation_id
+    if not target_inst:
+        raise HTTPException(
+            status_code=400,
+            detail="No GitHub installation ID provided or linked to this project. Please install the GitHub App first."
+        )
+
+    try:
+        service = get_github_app_service()
+        repos = service.list_installation_repositories(target_inst)
+        return repos
+    except GitHubAppError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post("/projects/{project_id}/github/connect")
+def api_connect_github_repo(project_id: str, req: GitHubConnectRequest) -> dict[str, Any]:
+    """Connect a GitHub repository and installation to a project."""
+    from ichnoscope.projects import connect_github_project
+
+    updated = connect_github_project(project_id, req.installation_id, req.repo)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return updated.to_safe_dict()
+
+
+@router.post("/projects/{project_id}/github/disconnect")
+def api_disconnect_github_repo(project_id: str) -> dict[str, Any]:
+    """Disconnect GitHub repository from a project."""
+    from ichnoscope.projects import disconnect_github_project
+
+    updated = disconnect_github_project(project_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return updated.to_safe_dict()
 
 
 @router.get("/internal/v1/projects/cache")

@@ -7,6 +7,7 @@ import {
   api,
   Project,
   ProjectCreateInput,
+  GitHubRepo,
   setSelectedProjectId,
 } from '@/lib/api';
 import {
@@ -16,6 +17,8 @@ import {
   RotateCcw,
   Trash2,
   ExternalLink,
+  Link2,
+  RefreshCw,
   Shield,
   Key,
   FolderKanban,
@@ -41,6 +44,16 @@ export default function ProjectsPage() {
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // GitHub Modal State
+  const [githubModalProject, setGithubModalProject] = useState<Project | null>(null);
+  const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
+  const [githubLoading, setGithubLoading] = useState(false);
+  const [githubInstallUrl, setGithubInstallUrl] = useState('');
+  const [selectedRepo, setSelectedRepo] = useState('');
+  const [customRepoInput, setCustomRepoInput] = useState('');
+  const [manualInstallationId, setManualInstallationId] = useState('');
+  const [isConnectingGithub, setIsConnectingGithub] = useState(false);
+
   // Form State
   const [formName, setFormName] = useState('');
   const [formEnv, setFormEnv] = useState('production');
@@ -65,6 +78,77 @@ export default function ProjectsPage() {
   useEffect(() => {
     loadProjects();
   }, []);
+
+  const handleOpenGithubModal = async (project: Project) => {
+    setGithubModalProject(project);
+    setGithubLoading(true);
+    setGithubRepos([]);
+    setSelectedRepo(project.github_repo || project.github_repo_override || '');
+    setCustomRepoInput(project.github_repo || project.github_repo_override || '');
+    setManualInstallationId(project.github_installation_id || '');
+    try {
+      const data = await api.getGitHubInstallUrl(project.project_id);
+      setGithubInstallUrl(data.install_url);
+      if (project.github_installation_id) {
+        const repos = await api.getGitHubRepos(project.project_id, project.github_installation_id);
+        setGithubRepos(repos);
+      }
+    } catch (err: any) {
+      console.warn('Could not load github info:', err);
+    } finally {
+      setGithubLoading(false);
+    }
+  };
+
+  const handleFetchReposForInstall = async () => {
+    if (!githubModalProject || !manualInstallationId.trim()) return;
+    setGithubLoading(true);
+    try {
+      const repos = await api.getGitHubRepos(githubModalProject.project_id, manualInstallationId.trim());
+      setGithubRepos(repos);
+      if (repos.length > 0 && !selectedRepo) {
+        setSelectedRepo(repos[0].full_name);
+      }
+    } catch (err: any) {
+      alert(err.message || 'Failed to fetch repositories for this installation ID');
+    } finally {
+      setGithubLoading(false);
+    }
+  };
+
+  const handleConnectRepo = async () => {
+    if (!githubModalProject) return;
+    const repoToLink = selectedRepo.trim() || customRepoInput.trim();
+    if (!repoToLink) {
+      alert('Please select or specify a repository');
+      return;
+    }
+
+    setIsConnectingGithub(true);
+    try {
+      const instId = manualInstallationId.trim() || githubModalProject.github_installation_id || 'manual';
+      await api.connectGitHubRepo(githubModalProject.project_id, instId, repoToLink);
+      await loadProjects();
+      setGithubModalProject(null);
+    } catch (err: any) {
+      alert(err.message || 'Failed to link GitHub repository');
+    } finally {
+      setIsConnectingGithub(false);
+    }
+  };
+
+  const handleDisconnectRepo = async (project: Project) => {
+    if (!confirm(`Are you sure you want to disconnect GitHub from "${project.name}"?`)) return;
+    setActionLoadingId(project.project_id);
+    try {
+      await api.disconnectGitHubRepo(project.project_id);
+      await loadProjects();
+    } catch (err: any) {
+      alert(err.message || 'Failed to disconnect repository');
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
 
   const handleCopy = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -351,13 +435,48 @@ export default function ProjectsPage() {
                 </div>
 
                 {/* Row 3: Repo & Slack Routing Info */}
-                <div className="flex flex-wrap items-center gap-4 text-xs text-text-secondary pt-1 border-t border-border-subtle/30">
-                  <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-4 text-xs text-text-secondary pt-2 border-t border-border-subtle/30">
+                  <div className="flex items-center gap-2">
                     <Github className="w-3.5 h-3.5 text-text-muted" />
-                    <span>Target Repo:</span>
-                    <span className="font-mono text-text-primary font-medium">
-                      {proj.github_repo_override || '(Default System Repo)'}
-                    </span>
+                    <span className="font-medium text-text-secondary">GitHub:</span>
+                    {proj.github_repo || proj.github_repo_override ? (
+                      <div className="flex items-center gap-1.5">
+                        <a
+                          href={`https://github.com/${proj.github_repo || proj.github_repo_override}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-mono text-purple-600 dark:text-purple-400 hover:underline font-semibold flex items-center gap-1 bg-purple-500/10 px-2 py-0.5 rounded border border-purple-500/20 text-[11px]"
+                        >
+                          <span>{proj.github_repo || proj.github_repo_override}</span>
+                          <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenGithubModal(proj)}
+                          className="text-[10px] text-text-muted hover:text-text-primary px-1.5 py-0.5 rounded hover:bg-hover border border-border-subtle/50"
+                        >
+                          Configure
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleDisconnectRepo(proj)}
+                          title="Disconnect Repository"
+                          className="text-[10px] text-red-500 hover:text-red-600 px-1 py-0.5 rounded hover:bg-red-500/10"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenGithubModal(proj)}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded bg-purple-600/10 hover:bg-purple-600 hover:text-white border border-purple-500/30 text-purple-600 dark:text-purple-400 text-[11px] font-medium transition-all"
+                      >
+                        <Github className="w-3 h-3" />
+                        <span>Connect GitHub Repo</span>
+                      </button>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1.5">
@@ -612,6 +731,135 @@ Sentry.init({
                 className="px-4 py-1.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white font-medium text-xs"
               >
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal 3: GitHub App & Repository Connector */}
+      {githubModalProject && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-100">
+          <div className="w-full max-w-lg rounded-xl bg-surface border border-border-strong shadow-2xl p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-border-subtle pb-3">
+              <div className="flex items-center gap-2">
+                <Github className="w-4 h-4 text-purple-500" />
+                <h3 className="text-sm font-semibold text-text-primary">
+                  Connect GitHub to &quot;{githubModalProject.name}&quot;
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setGithubModalProject(null)}
+                className="text-text-muted hover:text-text-primary"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              <p className="text-text-secondary leading-relaxed">
+                Connecting this project allows Ichnoscope to run <strong>GraphQL blame</strong>, correlate incidents with git commits, inspect <strong>diffs</strong>, and publish official triage issues.
+              </p>
+
+              {/* Step 1: Install GitHub App */}
+              <div className="p-3.5 rounded-lg border border-border-subtle bg-surface-raised space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-text-primary flex items-center gap-1.5 text-xs">
+                    <span className="w-4 h-4 rounded-full bg-purple-500 text-white flex items-center justify-center text-[10px] font-bold">1</span>
+                    Authorize &amp; Install GitHub App
+                  </span>
+                  {githubInstallUrl && (
+                    <a
+                      href={githubInstallUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-purple-600 hover:bg-purple-700 text-white font-medium text-[11px] shadow-xs"
+                    >
+                      <span>Install on GitHub</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  )}
+                </div>
+                <p className="text-[11px] text-text-muted">
+                  Choose which repositories or organization to give Ichnoscope access to. If already installed, proceed to step 2.
+                </p>
+              </div>
+
+              {/* Step 2: Select Repository */}
+              <div className="p-3.5 rounded-lg border border-border-subtle bg-surface-raised space-y-3">
+                <span className="font-semibold text-text-primary flex items-center gap-1.5 text-xs">
+                  <span className="w-4 h-4 rounded-full bg-purple-500 text-white flex items-center justify-center text-[10px] font-bold">2</span>
+                  Link Repository
+                </span>
+
+                {/* If installation repos are available */}
+                {githubRepos.length > 0 ? (
+                  <div className="space-y-1.5">
+                    <label className="text-[11px] text-text-secondary font-medium">Select Accessible Repository</label>
+                    <select
+                      value={selectedRepo}
+                      onChange={(e) => setSelectedRepo(e.target.value)}
+                      className="w-full px-3 py-2 rounded-md border border-border-subtle bg-surface text-text-primary text-xs focus:outline-none focus:border-purple-500"
+                    >
+                      {githubRepos.map((r) => (
+                        <option key={r.id} value={r.full_name}>
+                          {r.full_name} {r.private ? '(private)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <label className="text-[11px] text-text-secondary font-medium">Repository Full Name (owner/repo)</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. your-org/your-repo"
+                      value={customRepoInput}
+                      onChange={(e) => setCustomRepoInput(e.target.value)}
+                      className="w-full px-3 py-2 rounded-md border border-border-subtle bg-surface text-text-primary text-xs focus:outline-none focus:border-purple-500 font-mono"
+                    />
+                    <div className="flex items-center gap-2 pt-1">
+                      <input
+                        type="text"
+                        placeholder="Optional: GitHub Installation ID"
+                        value={manualInstallationId}
+                        onChange={(e) => setManualInstallationId(e.target.value)}
+                        className="flex-1 px-2.5 py-1.5 rounded-md border border-border-subtle bg-surface text-text-primary text-[11px] focus:outline-none focus:border-purple-500 font-mono"
+                      />
+                      {manualInstallationId && (
+                        <button
+                          type="button"
+                          onClick={handleFetchReposForInstall}
+                          disabled={githubLoading}
+                          className="px-2.5 py-1.5 rounded bg-surface hover:bg-hover border border-border-subtle text-text-secondary text-[11px] flex items-center gap-1"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${githubLoading ? 'animate-spin' : ''}`} />
+                          <span>Fetch Repos</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end gap-2 border-t border-border-subtle">
+              <button
+                type="button"
+                onClick={() => setGithubModalProject(null)}
+                className="px-3 py-1.5 rounded-md hover:bg-hover text-text-secondary text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isConnectingGithub || (!selectedRepo && !customRepoInput)}
+                onClick={handleConnectRepo}
+                className="px-4 py-1.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white font-medium text-xs disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {isConnectingGithub ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
+                <span>Link Repository</span>
               </button>
             </div>
           </div>

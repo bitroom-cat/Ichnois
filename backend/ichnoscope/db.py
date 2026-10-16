@@ -236,6 +236,8 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             environment TEXT DEFAULT 'production',
             github_repo_override TEXT,
             slack_channel_override TEXT,
+            github_installation_id TEXT,
+            github_repo TEXT,
             is_active INTEGER DEFAULT 1,
             created_at REAL NOT NULL
         );
@@ -373,7 +375,7 @@ def migrate_to_v2(conn: Any) -> None:
             );
             """
         )
-        for col in ["github_repo_override", "slack_channel_override"]:
+        for col in ["github_repo_override", "slack_channel_override", "github_installation_id", "github_repo"]:
             try:
                 conn.execute(f"ALTER TABLE project_keys ADD COLUMN {col} TEXT;")
             except Exception:

@@ -89,8 +89,20 @@ export interface Project {
   environment: string;
   github_repo_override?: string | null;
   slack_channel_override?: string | null;
+  github_installation_id?: string | null;
+  github_repo?: string | null;
   is_active: boolean;
   created_at: number;
+}
+
+export interface GitHubRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  private: boolean;
+  html_url: string;
+  description?: string | null;
+  default_branch?: string;
 }
 
 export interface ProjectCreateInput {
@@ -1079,5 +1091,48 @@ export const api = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to delete project');
     }
+  },
+
+  getGitHubInstallUrl: async (projectId: string): Promise<{ install_url: string; app_name: string; project_id: string }> => {
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/github/install-url`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to get GitHub App install URL');
+    }
+    return res.json();
+  },
+
+  getGitHubRepos: async (projectId: string, installationId?: string): Promise<GitHubRepo[]> => {
+    const query = installationId ? `?installation_id=${encodeURIComponent(installationId)}` : '';
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/github/repos${query}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to list GitHub repositories');
+    }
+    return res.json();
+  },
+
+  connectGitHubRepo: async (projectId: string, installationId: string | number, repo: string): Promise<Project> => {
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/github/connect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ installation_id: installationId, repo }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to link GitHub repository');
+    }
+    return res.json();
+  },
+
+  disconnectGitHubRepo: async (projectId: string): Promise<Project> => {
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/github/disconnect`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to disconnect GitHub repository');
+    }
+    return res.json();
   },
 };

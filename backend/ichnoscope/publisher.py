@@ -77,12 +77,26 @@ def publish_issue(
     body_override: str | None = None,
     assignee_override: str | None = None,
     repo_override: str | None = None,
+    token_override: str | None = None,
+    project_id: str | None = None,
 ) -> PublishResult:
     """Publish a drafted incident issue to GitHub, honoring dry_run mode."""
     if settings is None:
         from ichnoscope.config import get_settings
 
         settings = get_settings()
+
+    # Dynamic project / GitHub App installation token lookup
+    if project_id and not (token_override and repo_override):
+        try:
+            from ichnoscope.projects import get_project
+            from ichnoscope.github_app import get_github_app_service
+            proj = get_project(project_id)
+            if proj and proj.github_installation_id and proj.github_repo:
+                repo_override = proj.github_repo
+                token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+        except Exception as exc:
+            logger.warning("Could not resolve dynamic GitHub App installation for project %s: %s", project_id, exc)
 
     owner = settings.github_owner
     repo = settings.github_repo_name
@@ -91,7 +105,7 @@ def publish_issue(
         parts = repo_override.split("/", 1)
         owner, repo = parts[0], parts[1]
 
-    token = settings.github_token.get_secret_value() if settings.github_token else None
+    token = token_override or (settings.github_token.get_secret_value() if settings.github_token else None)
     fp = fingerprint or calc_fingerprint(incident)
 
     draft = build_issue_draft(

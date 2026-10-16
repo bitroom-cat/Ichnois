@@ -119,6 +119,9 @@ class Settings(BaseModel):
     # GitHub and Sentry
     github_token: SecretStr | None = None
     github_repository: str | None = None
+    github_app_id: str | None = None
+    github_app_name: str | None = None
+    github_app_private_key_path: str | None = None
     sentry_client_secret: SecretStr | None = None
 
     # Behavior
@@ -282,6 +285,9 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     # GitHub and Sentry
     github_token = _parse_secret(env.get("GITHUB_TOKEN"))
     github_repository = _parse_str(env.get("GITHUB_REPOSITORY"))
+    github_app_id = _parse_str(env.get("GITHUB_APP_ID"))
+    github_app_name = _parse_str(env.get("GITHUB_APP_NAME")) or "ichnois-connection"
+    github_app_private_key_path = _parse_str(env.get("GITHUB_APP_PRIVATE_KEY_PATH"))
     sentry_client_secret = _parse_secret(env.get("SENTRY_CLIENT_SECRET"))
 
     # Database & Storage (Turso libSQL or Local SQLite)
@@ -344,6 +350,9 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     settings = Settings(
         github_token=github_token,
         github_repository=github_repository,
+        github_app_id=github_app_id,
+        github_app_name=github_app_name,
+        github_app_private_key_path=github_app_private_key_path,
         sentry_client_secret=sentry_client_secret,
         path_prefix_strip=path_prefix_strip,
         fallback_assignee=fallback_assignee,
