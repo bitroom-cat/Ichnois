@@ -72,26 +72,29 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
         settings = get_settings()
         admin_token = settings.admin_token.get_secret_value() if settings.admin_token else None
 
-        if admin_token:
+        if admin_token and token and hmac.compare_digest(token, admin_token):
+            return await call_next(request)  # Valid legacy admin token
+
+        # If either auth mechanism is configured and no valid token was provided:
+        if supabase_secret or admin_token:
             if not token:
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "Missing Authorization header with Bearer token for Dashboard API"},
                 )
-            if not hmac.compare_digest(token, admin_token):
-                logger.warning("Unauthorized access attempt to %s with invalid token", path)
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "Invalid Bearer token"},
-                )
-        else:
-            if not supabase_secret:
-                enforce_strict = os.getenv("ENFORCE_ADMIN_TOKEN", "false").lower() == "true"
-                if enforce_strict:
-                    return JSONResponse(
-                        status_code=401,
-                        content={"detail": "ADMIN_TOKEN or SUPABASE_JWT_SECRET required but not configured"},
-                    )
+            logger.warning("Unauthorized access attempt to %s with invalid token", path)
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or expired Bearer token"},
+            )
+
+        # Neither auth mechanism configured — check if dev mode strictly enforces
+        enforce_strict = os.getenv("ENFORCE_ADMIN_TOKEN", "false").lower() == "true"
+        if enforce_strict:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "ADMIN_TOKEN or SUPABASE_JWT_SECRET required but not configured"},
+            )
 
         return await call_next(request)
 
