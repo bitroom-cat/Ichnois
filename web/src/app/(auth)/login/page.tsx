@@ -24,6 +24,7 @@ function LoginFormContent() {
   const searchParams = useSearchParams();
   const nextUrl = searchParams.get('next') || '/app/runs';
   const urlError = searchParams.get('error');
+  const urlErrorDesc = searchParams.get('error_description');
 
   const [mode, setMode] = useState<'signin' | 'signup' | 'forgot'>('signin');
   const [email, setEmail] = useState('');
@@ -34,10 +35,24 @@ function LoginFormContent() {
   const [oauthLoading, setOauthLoading] = useState(false);
 
   useEffect(() => {
-    if (urlError === 'auth_failed') {
+    if (urlErrorDesc) {
+      setError(decodeURIComponent(urlErrorDesc.replace(/\+/g, ' ')));
+    } else if (urlError === 'auth_failed') {
       setError('OAuth authentication failed or was cancelled. Please try again.');
+    } else if (urlError) {
+      setError(decodeURIComponent(urlError.replace(/\+/g, ' ')));
     }
-  }, [urlError]);
+  }, [urlError, urlErrorDesc]);
+
+  const getSiteUrl = () => {
+    if (process.env.NEXT_PUBLIC_SITE_URL) {
+      return process.env.NEXT_PUBLIC_SITE_URL.replace(/\/$/, '');
+    }
+    if (typeof window !== 'undefined' && window.location.origin) {
+      return window.location.origin;
+    }
+    return 'https://ichnoscope-wcc-30.vercel.app';
+  };
 
   const supabase = createClient();
 
@@ -67,7 +82,7 @@ function LoginFormContent() {
           email,
           password,
           options: {
-            emailRedirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(nextUrl)}`,
+            emailRedirectTo: `${getSiteUrl()}/auth/callback?next=${encodeURIComponent(nextUrl)}`,
           },
         });
 
@@ -86,7 +101,7 @@ function LoginFormContent() {
         }
       } else if (mode === 'forgot') {
         const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
-          redirectTo: `${window.location.origin}/auth/callback?next=/app/settings`,
+          redirectTo: `${getSiteUrl()}/auth/callback?next=/app/settings`,
         });
 
         if (resetError) {
@@ -111,7 +126,7 @@ function LoginFormContent() {
       const { error: oauthError } = await supabase.auth.signInWithOAuth({
         provider: 'github',
         options: {
-          redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(nextUrl)}`,
+          redirectTo: `${getSiteUrl()}/auth/callback?next=${encodeURIComponent(nextUrl)}`,
         },
       });
 

@@ -182,7 +182,10 @@ export interface RunItem {
 }
 
 export const BACKEND_URL =
-  process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  (process.env.NODE_ENV === 'production'
+    ? 'https://ichnoscope-backend.onrender.com'
+    : 'http://localhost:8000');
 
 export const USE_MOCK_API = false; // Primary live mode with automatic fallback
 
