@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
@@ -8,7 +8,12 @@ import { ChevronDown, Check, Plus, FolderKanban, Globe } from 'lucide-react';
 export function ProjectSwitcher() {
   const { currentWorkspace, isGlobal, activeProject, projects, selectWorkspace } = useWorkspace();
   const [isOpen, setIsOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -28,7 +33,10 @@ export function ProjectSwitcher() {
     setIsOpen(false);
   };
 
-  const displayName = isGlobal ? 'Global Workspace' : activeProject?.name || currentWorkspace;
+  const isEffectivelyGlobal = !mounted || isGlobal;
+  const displayName = !mounted
+    ? 'Global Workspace'
+    : (isGlobal ? 'Global Workspace' : activeProject?.name || currentWorkspace);
 
   return (
     <div className="relative inline-block text-left" ref={dropdownRef}>
@@ -38,14 +46,14 @@ export function ProjectSwitcher() {
         className="flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-hover border border-border-subtle bg-surface-raised/40 text-text-primary text-xs font-medium transition-colors select-none group"
       >
         <span className={`w-4 h-4 rounded flex items-center justify-center text-[10px] font-bold shrink-0 ${
-          isGlobal ? 'bg-indigo-500/20 text-indigo-500' : 'bg-purple-500/20 text-purple-500'
+          isEffectivelyGlobal ? 'bg-indigo-500/20 text-indigo-500' : 'bg-purple-500/20 text-purple-500'
         }`}>
-          {isGlobal ? <Globe className="w-3 h-3" /> : <FolderKanban className="w-3 h-3" />}
+          {isEffectivelyGlobal ? <Globe className="w-3 h-3" /> : <FolderKanban className="w-3 h-3" />}
         </span>
         <span className="truncate max-w-[130px] font-semibold">
           {displayName}
         </span>
-        {!isGlobal && activeProject && (
+        {mounted && !isGlobal && activeProject && (
           <span className="hidden sm:inline-block px-1.5 py-0.2 text-[9px] rounded uppercase tracking-wider bg-surface-sunken text-text-muted border border-border-subtle">
             {activeProject.environment}
           </span>

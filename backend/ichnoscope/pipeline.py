@@ -275,16 +275,21 @@ def publish_draft_issue(
 
     repo_override = None
     channel_override = None
+    webhook_override = None
     if state.project_id:
         try:
             from ichnoscope.projects import get_project
 
             proj = get_project(state.project_id, db_path=db_path)
             if proj:
-                if proj.github_repo_override:
-                    repo_override = proj.github_repo_override
+                if proj.github_repo or proj.github_repo_override:
+                    repo_override = proj.github_repo or proj.github_repo_override
                 if proj.slack_channel_override:
                     channel_override = proj.slack_channel_override
+                if proj.webhook_url:
+                    webhook_override = proj.webhook_url
+                if proj.fallback_assignee and not assignee:
+                    assignee = proj.fallback_assignee
         except Exception:
             pass
 
@@ -313,6 +318,7 @@ def publish_draft_issue(
             severity=state.severity or "P3-Medium",
             assignee=pub_res.assignee,
             issue_url=pub_res.issue_url,
+            webhook_url=webhook_override,
             channel_override=channel_override,
             settings=settings,
             client=http_client,

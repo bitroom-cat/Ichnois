@@ -41,7 +41,6 @@ export interface SystemSettings {
   slack_channel: string;
   slack_enabled: boolean;
   slack_webhook_url?: string;
-  admin_token?: string;
   auto_comment_duplicates: boolean;
   automation_mode?: 'full_manual' | 'semi_autonomous' | 'fully_autonomous';
 }
@@ -93,6 +92,10 @@ export interface Project {
   slack_channel_override?: string | null;
   github_installation_id?: string | null;
   github_repo?: string | null;
+  fallback_assignee?: string | null;
+  path_prefix_strip?: string | null;
+  window_hours?: number;
+  automation_mode_override?: string | null;
   is_active: boolean;
   created_at: number;
   updated_at?: number;
@@ -129,6 +132,7 @@ export interface GitHubRepo {
   id: number;
   name: string;
   full_name: string;
+  owner?: string;
   private: boolean;
   html_url: string;
   description?: string | null;
@@ -141,6 +145,25 @@ export interface ProjectCreateInput {
   rate_limit_min?: number;
   github_repo_override?: string;
   slack_channel_override?: string;
+  webhook_url?: string;
+  fallback_assignee?: string;
+  path_prefix_strip?: string;
+  window_hours?: number;
+  automation_mode_override?: string;
+}
+
+export interface ProjectUpdateInput {
+  name?: string;
+  environment?: string;
+  rate_limit_min?: number;
+  github_repo_override?: string | null;
+  slack_channel_override?: string | null;
+  webhook_url?: string | null;
+  fallback_assignee?: string | null;
+  path_prefix_strip?: string | null;
+  window_hours?: number | null;
+  automation_mode_override?: string | null;
+  is_active?: boolean;
 }
 
 export function getSelectedProjectId(): string {
@@ -249,30 +272,32 @@ export function setAdminToken(token: string) {
   }
 }
 
+export async function getCurrentUserToken(): Promise<string | null> {
+  if (typeof window === 'undefined') return null;
+  try {
+    const { createClient } = await import('@/lib/supabase/client');
+    const supabase = createClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    return session?.access_token || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers || {});
-  const adminToken = getAdminToken();
+  const userToken = await getCurrentUserToken();
+  syncUserCacheScope(userToken);
 
-  // Try to get Supabase user session token first for user-isolated access
-  let hasUserSession = false;
-  if (typeof window !== 'undefined' && !headers.has('Authorization')) {
-    try {
-      const { createClient } = await import('@/lib/supabase/client');
-      const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.access_token) {
-        headers.set('Authorization', `Bearer ${session.access_token}`);
-        hasUserSession = true;
-      }
-    } catch {
-      // Ignore if supabase client cannot initialize
-    }
-  }
-
-  // Only fallback to admin token if no authenticated user session was found
-  if (!hasUserSession && !headers.has('Authorization') && adminToken) {
-    headers.set('Authorization', `Bearer ${adminToken}`);
-    if (!headers.has('X-Admin-Token')) {
+  if (userToken) {
+    // Authenticated user session: pass user Bearer JWT, NEVER send X-Admin-Token
+    headers.set('Authorization', `Bearer ${userToken}`);
+    headers.delete('X-Admin-Token');
+  } else if (!headers.has('Authorization')) {
+    // Internal fallback for unauthenticated environments without session
+    const adminToken = getAdminToken();
+    if (adminToken) {
+      headers.set('Authorization', `Bearer ${adminToken}`);
       headers.set('X-Admin-Token', adminToken);
     }
   }
@@ -497,7 +522,6 @@ const DEFAULT_SETTINGS: SystemSettings = {
   slack_channel: '#eng-incidents',
   slack_enabled: true,
   slack_webhook_url: '',
-  admin_token: '',
   auto_comment_duplicates: true,
 };
 
@@ -543,6 +567,33 @@ const DEFAULT_HEALTH: DependencyHealth[] = [
     meta: { channel: '#eng-incidents', auth: 'webhook-verified' },
   },
 ];
+
+let _currentCacheToken: string | null = null;
+
+let _projectsCache: { data: Project[]; time: number } | null = null;
+let _projectsInFlight: Promise<Project[]> | null = null;
+
+let _metricsCache: Record<string, { data: WorkspaceMetrics; time: number } | undefined> = {};
+let _metricsInFlight: Record<string, Promise<WorkspaceMetrics> | undefined> = {};
+
+let _usersCache: { data: WorkspaceMember[]; time: number } | null = null;
+let _workspacesCache: { data: WorkspaceItem[]; time: number } | null = null;
+
+export function invalidateClientCache(): void {
+  _projectsCache = null;
+  _projectsInFlight = null;
+  _metricsCache = {};
+  _metricsInFlight = {};
+  _usersCache = null;
+  _workspacesCache = null;
+}
+
+export function syncUserCacheScope(token: string | null): void {
+  if (token !== _currentCacheToken) {
+    invalidateClientCache();
+    _currentCacheToken = token;
+  }
+}
 
 export const api = {
   getRuns: async (projectId?: string): Promise<any[]> => {
@@ -928,7 +979,6 @@ export const api = {
           slack_channel: '#eng-incidents',
           slack_enabled: Boolean(data.slack_webhook_url),
           slack_webhook_url: data.slack_webhook_url || '',
-          admin_token: data.admin_token || '',
           auto_comment_duplicates: true,
           automation_mode: data.automation_mode || 'semi_autonomous',
         };
@@ -959,7 +1009,6 @@ export const api = {
         p2_events: settings.p2_events,
         dry_run: settings.dry_run,
         slack_webhook_url: settings.slack_webhook_url,
-        admin_token: settings.admin_token,
         automation_mode: settings.automation_mode,
       };
       const res = await apiFetch(`${BACKEND_URL}/api/settings`, {
@@ -974,7 +1023,6 @@ export const api = {
           github_repo: data.github_repository ?? settings.github_repo,
           fallback_assignee: data.fallback_assignee ?? settings.fallback_assignee,
           slack_webhook_url: data.slack_webhook_url ?? settings.slack_webhook_url,
-          admin_token: data.admin_token ?? settings.admin_token,
           automation_mode: data.automation_mode ?? settings.automation_mode,
         };
         if (typeof window !== 'undefined') {
@@ -1056,22 +1104,40 @@ export const api = {
     return toRunItem(newRun);
   },
 
-  getProjects: async (): Promise<Project[]> => {
-    try {
-      const res = await apiFetch(`${BACKEND_URL}/api/projects`, { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          return data;
-        }
-      }
-    } catch {
-      // Fallback
+  getProjects: async (forceFresh = false): Promise<Project[]> => {
+    const userToken = await getCurrentUserToken();
+    syncUserCacheScope(userToken);
+    const now = Date.now();
+    if (!forceFresh && _projectsCache && now - _projectsCache.time < 3000) {
+      return _projectsCache.data;
     }
-    return [];
+    if (_projectsInFlight) {
+      return _projectsInFlight;
+    }
+
+    _projectsInFlight = (async () => {
+      try {
+        const res = await apiFetch(`${BACKEND_URL}/api/projects`, { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            _projectsCache = { data, time: Date.now() };
+            return data;
+          }
+        }
+      } catch {
+        // Fallback
+      } finally {
+        _projectsInFlight = null;
+      }
+      return _projectsCache ? _projectsCache.data : [];
+    })();
+
+    return _projectsInFlight;
   },
 
   createProject: async (payload: ProjectCreateInput): Promise<Project> => {
+    invalidateClientCache();
     const res = await apiFetch(`${BACKEND_URL}/api/projects`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1081,10 +1147,12 @@ export const api = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to create project');
     }
+    invalidateClientCache();
     return res.json();
   },
 
   rotateProjectKey: async (projectId: string): Promise<Project> => {
+    invalidateClientCache();
     const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/keys/rotate`, {
       method: 'POST',
     });
@@ -1092,10 +1160,12 @@ export const api = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to rotate project credentials');
     }
+    invalidateClientCache();
     return res.json();
   },
 
   deleteProject: async (projectId: string): Promise<void> => {
+    invalidateClientCache();
     const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}`, {
       method: 'DELETE',
     });
@@ -1103,6 +1173,22 @@ export const api = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to delete project');
     }
+    invalidateClientCache();
+  },
+
+  updateProject: async (projectId: string, payload: ProjectUpdateInput): Promise<Project> => {
+    invalidateClientCache();
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to update project');
+    }
+    invalidateClientCache();
+    return res.json();
   },
 
   getGitHubInstallUrl: async (projectId: string): Promise<{ install_url: string; app_name: string; project_id: string }> => {
@@ -1124,46 +1210,79 @@ export const api = {
     return res.json();
   },
 
-  connectGitHubRepo: async (projectId: string, installationId: string | number, repo: string): Promise<Project> => {
+  connectGitHubRepo: async (
+    projectId: string,
+    installationId: string | number,
+    repo: string,
+    fallbackAssignee?: string
+  ): Promise<Project> => {
+    invalidateClientCache();
     const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/github/connect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ installation_id: installationId, repo }),
+      body: JSON.stringify({
+        installation_id: installationId,
+        repo,
+        fallback_assignee: fallbackAssignee,
+      }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to link GitHub repository');
     }
+    invalidateClientCache();
     return res.json();
   },
 
-  getWorkspaceMetrics: async (projectId?: string): Promise<WorkspaceMetrics> => {
-    try {
-      const targetProj = projectId && projectId !== 'all' && projectId !== 'global' ? projectId : undefined;
-      const url = targetProj
-        ? `${BACKEND_URL}/api/workspace/metrics?project_id=${encodeURIComponent(targetProj)}`
-        : `${BACKEND_URL}/api/workspace/metrics`;
-      const res = await apiFetch(url, { cache: 'no-store' });
-      if (res.ok) {
-        return await res.json();
-      }
-    } catch {
-      // Fallback
+  getWorkspaceMetrics: async (projectId?: string, forceFresh = false): Promise<WorkspaceMetrics> => {
+    const userToken = await getCurrentUserToken();
+    syncUserCacheScope(userToken);
+    const cacheKey = projectId || 'all';
+    const now = Date.now();
+    const cached = _metricsCache[cacheKey];
+    if (!forceFresh && cached && now - cached.time < 3000) {
+      return cached.data;
     }
-    return {
-      total_runs: 0,
-      staged_raw_count: 0,
-      staged_draft_count: 0,
-      published_count: 0,
-      dismissed_count: 0,
-      active_projects_count: 1,
-      incident_rate_per_min: 0,
-      project_id: projectId || 'ALL_PROJECTS',
-      projects: [],
-    };
+    const inFlight = _metricsInFlight[cacheKey];
+    if (inFlight) {
+      return inFlight;
+    }
+
+    _metricsInFlight[cacheKey] = (async () => {
+      try {
+        const targetProj = projectId && projectId !== 'all' && projectId !== 'global' ? projectId : undefined;
+        const url = targetProj
+          ? `${BACKEND_URL}/api/workspace/metrics?project_id=${encodeURIComponent(targetProj)}`
+          : `${BACKEND_URL}/api/workspace/metrics`;
+        const res = await apiFetch(url, { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          _metricsCache[cacheKey] = { data, time: Date.now() };
+          return data;
+        }
+      } catch {
+        // Fallback
+      } finally {
+        delete _metricsInFlight[cacheKey];
+      }
+      return _metricsCache[cacheKey]?.data || {
+        total_runs: 0,
+        staged_raw_count: 0,
+        staged_draft_count: 0,
+        published_count: 0,
+        dismissed_count: 0,
+        active_projects_count: 1,
+        incident_rate_per_min: 0,
+        project_id: projectId || 'ALL_PROJECTS',
+        projects: [],
+      };
+    })();
+
+    return _metricsInFlight[cacheKey];
   },
 
   disconnectGitHubRepo: async (projectId: string): Promise<Project> => {
+    invalidateClientCache();
     const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/github/disconnect`, {
       method: 'POST',
     });
@@ -1171,33 +1290,52 @@ export const api = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to disconnect GitHub repository');
     }
+    invalidateClientCache();
     return res.json();
   },
 
-  getWorkspaceUsers: async (): Promise<WorkspaceMember[]> => {
+  getWorkspaceUsers: async (forceFresh = false): Promise<WorkspaceMember[]> => {
+    const userToken = await getCurrentUserToken();
+    syncUserCacheScope(userToken);
+    const now = Date.now();
+    if (!forceFresh && _usersCache && now - _usersCache.time < 5000) {
+      return _usersCache.data;
+    }
     try {
       const res = await apiFetch(`${BACKEND_URL}/api/workspace/users`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data)) return data;
+        if (Array.isArray(data)) {
+          _usersCache = { data, time: Date.now() };
+          return data;
+        }
       }
     } catch {
       // Fallback
     }
-    return [];
+    return _usersCache ? _usersCache.data : [];
   },
 
-  getUserWorkspaces: async (): Promise<WorkspaceItem[]> => {
+  getUserWorkspaces: async (forceFresh = false): Promise<WorkspaceItem[]> => {
+    const userToken = await getCurrentUserToken();
+    syncUserCacheScope(userToken);
+    const now = Date.now();
+    if (!forceFresh && _workspacesCache && now - _workspacesCache.time < 5000) {
+      return _workspacesCache.data;
+    }
     try {
       const res = await apiFetch(`${BACKEND_URL}/api/workspaces`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data)) return data;
+        if (Array.isArray(data)) {
+          _workspacesCache = { data, time: Date.now() };
+          return data;
+        }
       }
     } catch {
       // Fallback
     }
-    return [];
+    return _workspacesCache ? _workspacesCache.data : [];
   },
 };
 

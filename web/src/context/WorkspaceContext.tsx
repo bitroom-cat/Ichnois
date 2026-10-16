@@ -70,11 +70,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
 
-  const [currentWorkspace, setCurrentWorkspace] = useState<'global' | string>(() => {
-    if (typeof window === 'undefined') return 'global';
+  const [currentWorkspace, setCurrentWorkspace] = useState<'global' | string>('global');
+
+  // Sync client-persisted workspace preference safely after mount to prevent hydration mismatch
+  useEffect(() => {
     const saved = getSelectedProjectId();
-    return saved === 'all' ? 'global' : saved;
-  });
+    if (saved && saved !== 'all') {
+      setCurrentWorkspace(saved);
+    }
+  }, []);
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [metrics, setMetrics] = useState<WorkspaceMetrics | null>(null);

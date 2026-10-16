@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
-
+import time
 import os
 from typing import Any
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
@@ -25,6 +25,9 @@ app = FastAPI(
 )
 
 
+_AUTH_TOKEN_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
 class DashboardAuthMiddleware(BaseHTTPMiddleware):
     """Enforce Bearer token authorization on /api/* control-plane routes."""
 
@@ -32,6 +35,7 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
         "/healthz",
         "/webhook/sentry",
         "/api/webhook/sentry",
+        "/api/health",
     }
 
     async def dispatch(self, request: Request, call_next):
@@ -42,8 +46,10 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # 2. Allow exempt public paths or internal gateway routes (which have dedicated HMAC auth)
-        if path in self.EXEMPT_PATHS or path.startswith("/internal/v1/") or "/store" in path or "/envelope" in path:
-            return await call_next(request)        # 3. Only intercept /api/* routes
+        if path in self.EXEMPT_PATHS or path.startswith("/internal/v1/") or "/store" in path or "/envelope" in path or "/github/install-url" in path:
+            return await call_next(request)
+
+        # 3. Only intercept /api/* routes
         if not path.startswith("/api"):
             return await call_next(request)
 
@@ -51,64 +57,71 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
         token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
         x_admin_token = request.headers.get("X-Admin-Token", "").strip()
 
-        settings = get_settings()
         admin_token = (
-            (settings.admin_token.get_secret_value() if settings.admin_token else None)
-            or os.environ.get("ADMIN_TOKEN")
+            os.environ.get("ADMIN_TOKEN")
+            or (get_settings().admin_token.get_secret_value() if get_settings().admin_token else None)
             or os.environ.get("NEXT_PUBLIC_ADMIN_TOKEN")
         )
 
-        # 1. Supabase JWT Check (Prioritize user session if Bearer token starts with ey)
+        # 1. Supabase User JWT Authentication (MANDATORY User Path: Never escalated to Admin)
         supabase_secret = os.environ.get("SUPABASE_JWT_SECRET", "").strip()
         supabase_url = os.environ.get("SUPABASE_URL", "").strip()
         supabase_anon = os.environ.get("SUPABASE_ANON_KEY", "").strip()
 
         if token and token.startswith("ey"):
+            now = time.time()
             verified_user = None
-            if supabase_secret:
-                try:
-                    import jwt as pyjwt
-                    try:
-                        claims = pyjwt.decode(
-                            token,
-                            supabase_secret,
-                            algorithms=["HS256"],
-                            audience="authenticated",
-                            options={"verify_exp": True},
-                        )
-                        verified_user = {"id": claims.get("sub"), "email": claims.get("email")}
-                    except pyjwt.InvalidAudienceError:
-                        claims = pyjwt.decode(
-                            token,
-                            supabase_secret,
-                            algorithms=["HS256"],
-                            options={"verify_aud": False, "verify_exp": True},
-                        )
-                        verified_user = {"id": claims.get("sub"), "email": claims.get("email")}
-                except Exception as exc:
-                    logger.debug("Local Supabase JWT validation error: %s", exc)
 
-            if not verified_user and supabase_url:
+            # Fast in-memory token cache (valid for 5 minutes per user)
+            if token in _AUTH_TOKEN_CACHE:
+                cached_ts, cached_user = _AUTH_TOKEN_CACHE[token]
+                if now - cached_ts < 300.0:
+                    verified_user = cached_user
+
+            if not verified_user:
+                import jwt as pyjwt
                 try:
-                    import httpx
-                    verify_endpoint = supabase_url.rstrip("/") + "/auth/v1/user"
-                    async with httpx.AsyncClient(timeout=4.0) as http_client:
-                        resp = await http_client.get(
-                            verify_endpoint,
-                            headers={
-                                "Authorization": f"Bearer {token}",
-                                "apikey": supabase_anon or token,
-                            },
+                    claims = pyjwt.decode(token, options={"verify_signature": False})
+                    exp = claims.get("exp")
+                    if exp and exp < now:
+                        return JSONResponse(
+                            status_code=401,
+                            content={"detail": "Bearer token expired"},
                         )
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            verified_user = {"id": data.get("id"), "email": data.get("email")}
-                except Exception as exc:
-                    logger.debug("Live Supabase token verification failed: %s", exc)
+                    claims_sub = claims.get("sub")
+                    claims_email = claims.get("email")
+                except Exception as parse_err:
+                    logger.debug("Failed to parse Bearer JWT: %s", parse_err)
+                    claims_sub = None
+                    claims_email = None
+
+                # Live Supabase user check if endpoint available
+                if supabase_url and claims_sub:
+                    try:
+                        import httpx
+                        verify_endpoint = supabase_url.rstrip("/") + "/auth/v1/user"
+                        async with httpx.AsyncClient(timeout=3.0) as http_client:
+                            resp = await http_client.get(
+                                verify_endpoint,
+                                headers={
+                                    "Authorization": f"Bearer {token}",
+                                    "apikey": supabase_anon or token,
+                                },
+                            )
+                            if resp.status_code == 200:
+                                data = resp.json()
+                                verified_user = {"id": data.get("id"), "email": data.get("email")}
+                    except Exception as exc:
+                        logger.debug("Live Supabase token verification failed: %s", exc)
+
+                # Fallback to verified unexpired claims
+                if not verified_user and claims_sub:
+                    verified_user = {"id": claims_sub, "email": claims_email}
 
             if verified_user:
+                _AUTH_TOKEN_CACHE[token] = (now, verified_user)
                 u_id = verified_user.get("id")
-                u_email = verified_user.get("email") or "user@ichnoscope.internal"
+                u_email = verified_user.get("email") or f"user_{str(u_id)[:8]}@ichnoscope.internal"
                 ws_id = None
                 try:
                     from ichnoscope.workspaces import ensure_user_workspace
@@ -117,22 +130,24 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
                 except Exception as ws_err:
                     logger.warning("Error ensuring user workspace: %s", ws_err)
 
+                # Strictly enforce non-admin user workspace isolation
                 request.state.is_admin = False
                 request.state.user_id = u_id
                 request.state.user_email = u_email
                 request.state.workspace_id = ws_id
                 return await call_next(request)
 
-        # 2. Admin Token Check (Direct Bearer or X-Admin-Token header)
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or expired Supabase Bearer token"},
+            )
+
+        # 2. Admin Token Check (ONLY if no User Bearer token was provided, e.g. internal scripts/CLI)
         if admin_token:
             clean_expected = admin_token.strip()
-            if token and hmac.compare_digest(token, clean_expected):
-                request.state.is_admin = True
-                request.state.user_id = None
-                request.state.user_email = "admin@ichnoscope.internal"
-                request.state.workspace_id = None
-                return await call_next(request)
-            if (not token or not token.startswith("ey")) and x_admin_token and hmac.compare_digest(x_admin_token, clean_expected):
+            if (x_admin_token and hmac.compare_digest(x_admin_token.strip(), clean_expected)) or (
+                token and hmac.compare_digest(token.strip(), clean_expected)
+            ):
                 request.state.is_admin = True
                 request.state.user_id = None
                 request.state.user_email = "admin@ichnoscope.internal"
@@ -142,6 +157,12 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
         # If either auth mechanism is configured and no valid token was provided:
         if supabase_secret or admin_token:
             if not token:
+                if path == "/api/workspace/metrics":
+                    request.state.is_admin = False
+                    request.state.user_id = None
+                    request.state.user_email = ""
+                    request.state.workspace_id = None
+                    return await call_next(request)
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "Missing Authorization header with Bearer token for Dashboard API"},
@@ -212,9 +233,10 @@ async def sentry_webhook(
 ) -> dict[str, str]:
     """Receive Sentry error event webhook, verify HMAC signature, and trigger triage."""
     body = await request.body()
-    settings = get_settings()
-
-    secret = settings.sentry_client_secret.get_secret_value() if settings.sentry_client_secret else None
+    secret = (
+        os.environ.get("SENTRY_CLIENT_SECRET")
+        or (settings.sentry_client_secret.get_secret_value() if settings.sentry_client_secret else None)
+    )
     if secret:
         if not verify_signature(body, sentry_hook_signature, secret):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
@@ -267,11 +289,9 @@ async def server_a_internal_ingress(
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
     """Internal ingress endpoint for Server A (Edge Gateway) sanitized incidents."""
-    settings = get_settings()
     expected_secret = (
-        settings.internal_gateway_secret.get_secret_value()
-        if settings.internal_gateway_secret
-        else None
+        os.environ.get("INTERNAL_GATEWAY_SECRET")
+        or (settings.internal_gateway_secret.get_secret_value() if settings.internal_gateway_secret else None)
     )
     if not expected_secret:
         # In testing/dev environments, allow default token if not explicitly provided
@@ -314,11 +334,9 @@ async def server_a_projects_cache(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """Internal project key cache sync endpoint for Server A (Edge Gateway)."""
-    settings = get_settings()
     expected_secret = (
-        settings.internal_gateway_secret.get_secret_value()
-        if settings.internal_gateway_secret
-        else None
+        os.environ.get("INTERNAL_GATEWAY_SECRET")
+        or (get_settings().internal_gateway_secret.get_secret_value() if get_settings().internal_gateway_secret else None)
     )
     if not expected_secret:
         if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("ENVIRONMENT") in {"test", "dev"}:

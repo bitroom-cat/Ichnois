@@ -187,6 +187,7 @@ class GitHubAppService:
                         "html_url": r["html_url"],
                         "description": r.get("description"),
                         "default_branch": r.get("default_branch", "main"),
+                        "owner": r.get("owner", {}).get("login", ""),
                     }
                     for r in repos
                 ]

@@ -92,9 +92,14 @@ def publish_issue(
             from ichnoscope.projects import get_project
             from ichnoscope.github_app import get_github_app_service
             proj = get_project(project_id)
-            if proj and proj.github_installation_id and proj.github_repo:
-                repo_override = proj.github_repo
-                token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+            if proj:
+                if proj.github_installation_id and proj.github_repo:
+                    repo_override = proj.github_repo
+                    token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+                elif proj.github_repo or proj.github_repo_override:
+                    repo_override = proj.github_repo or proj.github_repo_override
+                if proj.fallback_assignee and not assignee_override:
+                    assignee_override = proj.fallback_assignee
         except Exception as exc:
             logger.warning("Could not resolve dynamic GitHub App installation for project %s: %s", project_id, exc)
 

@@ -76,7 +76,15 @@ def api_list_runs(
     user_id = getattr(request.state, "user_id", None)
     workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
+
+    if not is_admin and not workspace_id and not user_id:
+        return []
+
     user_projects = [p.project_id for p in list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)]
+
+    if project_id and project_id not in ("ALL_PROJECTS", "all", "ALL"):
+        if not is_admin and project_id not in user_projects:
+            return []
 
     raw_runs = list_runs(
         limit=limit,
@@ -104,10 +112,12 @@ def api_get_run(run_id: str, request: Request) -> dict[str, Any]:
     user_id = getattr(request.state, "user_id", None)
     workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
-    if not is_admin and (user_id or workspace_id):
+    if not is_admin:
+        if not user_id and not workspace_id:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
         from ichnoscope.projects import list_projects
         user_projects = {p.project_id for p in list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)}
-        if state.project_id and state.project_id not in user_projects:
+        if not state.project_id or state.project_id not in user_projects:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
     detailed_logs = get_run_logs(run_id)
@@ -394,8 +404,8 @@ def api_get_settings() -> dict[str, Any]:
     summary = settings.safe_summary()
     if settings.slack_webhook_url:
         summary["slack_webhook_url"] = settings.slack_webhook_url.get_secret_value()
-    if settings.admin_token:
-        summary["admin_token"] = settings.admin_token.get_secret_value()
+    # ADMIN_TOKEN is strictly confidential and permanently purged from client presentation
+    summary.pop("admin_token", None)
     return summary
 
 
@@ -456,8 +466,8 @@ def api_update_settings(req: SettingsUpdateRequest) -> dict[str, Any]:
     summary = settings.safe_summary()
     if settings.slack_webhook_url:
         summary["slack_webhook_url"] = settings.slack_webhook_url.get_secret_value()
-    if settings.admin_token:
-        summary["admin_token"] = settings.admin_token.get_secret_value()
+    # ADMIN_TOKEN is strictly confidential and permanently purged from client presentation
+    summary.pop("admin_token", None)
     return summary
 
 
@@ -582,6 +592,7 @@ def api_replay_fixture(fixture: str = "payment_npe") -> dict[str, Any]:
 class GitHubConnectRequest(BaseModel):
     installation_id: str | int
     repo: str
+    fallback_assignee: str | None = None
 
 
 class ProjectCreateRequest(BaseModel):
@@ -590,6 +601,11 @@ class ProjectCreateRequest(BaseModel):
     rate_limit_min: int = 120
     github_repo_override: str | None = None
     slack_channel_override: str | None = None
+    fallback_assignee: str | None = None
+    path_prefix_strip: str | None = None
+    window_hours: int = 24
+    automation_mode_override: str | None = None
+    webhook_url: str | None = None
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -598,6 +614,11 @@ class ProjectUpdateRequest(BaseModel):
     rate_limit_min: int | None = None
     github_repo_override: str | None = None
     slack_channel_override: str | None = None
+    fallback_assignee: str | None = None
+    path_prefix_strip: str | None = None
+    window_hours: int | None = None
+    automation_mode_override: str | None = None
+    webhook_url: str | None = None
     is_active: bool | None = None
 
 
@@ -609,6 +630,10 @@ def api_list_projects(request: Request) -> list[dict[str, Any]]:
     user_id = getattr(request.state, "user_id", None)
     workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
+
+    if not is_admin and not workspace_id and not user_id:
+        return []
+
     projects = list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)
     return [p.to_safe_dict() for p in projects]
 
@@ -626,6 +651,10 @@ def api_create_project(req: ProjectCreateRequest, request: Request) -> dict[str,
         rate_limit_min=req.rate_limit_min,
         github_repo_override=req.github_repo_override,
         slack_channel_override=req.slack_channel_override,
+        fallback_assignee=req.fallback_assignee,
+        path_prefix_strip=req.path_prefix_strip,
+        window_hours=req.window_hours,
+        automation_mode_override=req.automation_mode_override,
         owner_id=user_id,
         workspace_id=workspace_id,
     )
@@ -738,7 +767,12 @@ def api_connect_github_repo(project_id: str, req: GitHubConnectRequest) -> dict[
     """Connect a GitHub repository and installation to a project."""
     from ichnoscope.projects import connect_github_project
 
-    updated = connect_github_project(project_id, req.installation_id, req.repo)
+    updated = connect_github_project(
+        project_id,
+        req.installation_id,
+        req.repo,
+        fallback_assignee=req.fallback_assignee,
+    )
     if not updated:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     return updated.to_safe_dict()
@@ -767,6 +801,19 @@ def api_get_workspace_metrics(
     user_id = getattr(request.state, "user_id", None)
     workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
+
+    if not is_admin and not workspace_id and not user_id:
+        return {
+            "total_runs": 0,
+            "staged_raw_count": 0,
+            "staged_draft_count": 0,
+            "published_count": 0,
+            "dismissed_count": 0,
+            "active_projects_count": 0,
+            "avg_triage_latency_ms": 245.0,
+            "project_id": project_id or "ALL_PROJECTS",
+        }
+
     user_projects = [p.project_id for p in list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)]
     return get_workspace_metrics(
         project_id=project_id,

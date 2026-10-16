@@ -36,6 +36,20 @@ class TursoCursor:
         return rem
 
 
+_TURSO_CLIENT: httpx.Client | None = None
+
+
+def get_turso_client() -> httpx.Client:
+    """Return a shared, persistent HTTP client for Turso pipeline requests with keep-alive connection pooling."""
+    global _TURSO_CLIENT
+    if _TURSO_CLIENT is None or _TURSO_CLIENT.is_closed:
+        _TURSO_CLIENT = httpx.Client(
+            timeout=10.0,
+            limits=httpx.Limits(max_keepalive_connections=30, max_connections=60, keepalive_expiry=120.0),
+        )
+    return _TURSO_CLIENT
+
+
 class TursoConnection:
     """Lightweight, thread-safe HTTP pipeline connection to Turso / libSQL database."""
 
@@ -47,7 +61,7 @@ class TursoConnection:
             normalized = f"https://{normalized}"
         self.endpoint = normalized.rstrip("/") + "/v2/pipeline"
         self.token = token
-        self._client = httpx.Client(timeout=15.0)
+        self._client = get_turso_client()
 
     def execute(self, sql: str, params: tuple | list = ()) -> TursoCursor:
         args = []
@@ -125,17 +139,37 @@ class TursoConnection:
         affected = result.get("affected_row_count", 0)
         return TursoCursor(rows, rowcount=affected)
 
+    def execute_batch(self, stmts: list[str]) -> None:
+        """Execute multiple SQL statements in a single pipeline HTTP round-trip."""
+        requests = [{"type": "execute", "stmt": {"sql": s, "args": []}} for s in stmts if s.strip()]
+        if not requests:
+            return
+        requests.append({"type": "close"})
+        try:
+            res = self._client.post(
+                self.endpoint,
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                },
+                json={"requests": requests},
+            )
+            res.raise_for_status()
+        except Exception as exc:
+            logger.debug("Turso batch execution non-fatal error: %s", exc)
+
     def commit(self) -> None:
         pass
 
     def close(self) -> None:
-        self._client.close()
+        # Keep connection open in pool for fast reuse
+        pass
 
     def __enter__(self) -> "TursoConnection":
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close()
+        pass
 
 
 def get_db_path(custom_path: str | Path | None = None) -> Path:
@@ -259,6 +293,10 @@ def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | st
             github_repo TEXT,
             description TEXT,
             webhook_url TEXT,
+            fallback_assignee TEXT,
+            path_prefix_strip TEXT,
+            window_hours INTEGER DEFAULT 24,
+            automation_mode_override TEXT,
             updated_at REAL,
             owner_id TEXT,
             workspace_id TEXT,
@@ -321,8 +359,7 @@ def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | st
 
     if turso_url and turso_token and db_path is None and DEFAULT_RUNS_DB == "ichnoscope_runs.db":
         with TursoConnection(turso_url.strip(), turso_token.strip()) as conn:
-            for stmt in tables:
-                conn.execute(stmt)
+            conn.execute_batch(tables)
             migrate_to_v2(conn)
         _INITIALIZED_DBS.add(cache_key)
         return turso_url
@@ -330,8 +367,17 @@ def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | st
     path = get_db_path(db_path)
     with sqlite3.connect(path) as conn:
         for stmt in tables:
-            conn.execute(stmt)
+            try:
+                conn.execute(stmt)
+            except Exception:
+                pass
         migrate_to_v2(conn)
+        for stmt in tables:
+            if "INDEX" in stmt:
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    pass
         conn.commit()
     _INITIALIZED_DBS.add(cache_key)
     return path
@@ -421,7 +467,21 @@ def migrate_to_v2(conn: Any) -> None:
             );
             """
         )
-        for col in ["github_repo_override", "slack_channel_override", "github_installation_id", "github_repo", "description", "webhook_url", "updated_at", "owner_id", "workspace_id"]:
+        for col in [
+            "github_repo_override",
+            "slack_channel_override",
+            "github_installation_id",
+            "github_repo",
+            "description",
+            "webhook_url",
+            "fallback_assignee",
+            "path_prefix_strip",
+            "window_hours",
+            "automation_mode_override",
+            "updated_at",
+            "owner_id",
+            "workspace_id",
+        ]:
             try:
                 conn.execute(f"ALTER TABLE project_keys ADD COLUMN {col} TEXT;")
             except Exception:

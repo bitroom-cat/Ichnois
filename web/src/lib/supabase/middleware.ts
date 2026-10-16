@@ -24,9 +24,14 @@ export async function updateSession(request: NextRequest) {
   );
 
   // Refresh session (this also validates the JWT)
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  let user = null;
+  try {
+    const { data } = await supabase.auth.getUser();
+    user = data?.user || null;
+  } catch {
+    // If refresh token is missing or expired, treat session as unauthenticated
+    user = null;
+  }
 
   return { user, supabaseResponse };
 }

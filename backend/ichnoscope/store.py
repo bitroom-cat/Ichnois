@@ -8,6 +8,14 @@ from typing import Any
 from ichnoscope.db import get_db, init_db
 from ichnoscope.models import RunState
 
+_METRICS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def invalidate_metrics_cache() -> None:
+    """Clear in-memory cached workspace metrics."""
+    global _METRICS_CACHE
+    _METRICS_CACHE.clear()
+
 
 def save_run(
     run_id: str,
@@ -87,6 +95,7 @@ def save_run(
                     ts,
                 ),
             )
+        invalidate_metrics_cache()
 
 
 def get_run(run_id: str, db_path: Path | str | None = None) -> RunState | None:
@@ -138,15 +147,11 @@ def list_runs(
                 params.append(project_id)
             else:
                 placeholders = ",".join("?" for _ in allowed_project_ids)
-                wheres.append(f"(project_id IN ({placeholders}) OR project_id IS NULL)")
+                wheres.append(f"project_id IN ({placeholders})")
                 params.extend(list(allowed_project_ids))
         elif project_id and project_id not in ("ALL_PROJECTS", "all", "ALL"):
-            if project_id in ("checkout-service", "proj_default"):
-                wheres.append("(project_id = ? OR project_id IS NULL)")
-                params.append(project_id)
-            else:
-                wheres.append("project_id = ?")
-                params.append(project_id)
+            wheres.append("project_id = ?")
+            params.append(project_id)
         if wheres:
             query += " WHERE " + " AND ".join(wheres)
         query += " ORDER BY updated_at DESC LIMIT ?;"
@@ -286,15 +291,22 @@ def upsert_policy(
     }
 
 
+_DEFAULT_POLICY_CACHED: dict[str, Any] | None = None
+
+
 def ensure_default_policy(
     default_mode: str = "semi_autonomous",
     db_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Seed the organization default policy if none exist."""
+    global _DEFAULT_POLICY_CACHED
+    if _DEFAULT_POLICY_CACHED is not None and db_path is None:
+        return _DEFAULT_POLICY_CACHED
     policies = list_policies(db_path=db_path)
     if policies:
+        _DEFAULT_POLICY_CACHED = policies[0]
         return policies[0]
-    return upsert_policy(
+    res = upsert_policy(
         "org-default",
         "Organization Default",
         {
@@ -374,12 +386,19 @@ def get_workspace_metrics(
     db_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Calculate aggregated incident metrics for the fleet or a specific microservice project."""
-    init_db(db_path)
     is_scoped = bool(project_id and project_id not in ("ALL_PROJECTS", "all", "ALL"))
     target_project = project_id if is_scoped else None
 
+    # Check in-memory cache (valid for 8 seconds)
+    cache_key = f"{target_project or 'all'}:{tuple(sorted(allowed_project_ids)) if allowed_project_ids is not None else 'fleet'}"
+    now = time.time()
+    if cache_key in _METRICS_CACHE:
+        cached_ts, cached_val = _METRICS_CACHE[cache_key]
+        if now - cached_ts < 8.0:
+            return cached_val
+
     if allowed_project_ids is not None and not allowed_project_ids:
-        return {
+        res = {
             "total_runs": 0,
             "staged_raw_count": 0,
             "staged_draft_count": 0,
@@ -389,14 +408,17 @@ def get_workspace_metrics(
             "avg_triage_latency_ms": 245.0,
             "project_id": target_project or "ALL_PROJECTS",
         }
+        _METRICS_CACHE[cache_key] = (now, res)
+        return res
 
+    init_db(db_path)
     with get_db(db_path) as conn:
         wheres: list[str] = []
         params: list[Any] = []
 
         if is_scoped:
             if allowed_project_ids is not None and target_project not in allowed_project_ids:
-                return {
+                res = {
                     "total_runs": 0,
                     "staged_raw_count": 0,
                     "staged_draft_count": 0,
@@ -406,11 +428,13 @@ def get_workspace_metrics(
                     "avg_triage_latency_ms": 245.0,
                     "project_id": target_project,
                 }
-            wheres.append("(project_id = ? OR (project_id IS NULL AND ? = 'proj_default'))")
-            params.extend([target_project, target_project])
+                _METRICS_CACHE[cache_key] = (now, res)
+                return res
+            wheres.append("project_id = ?")
+            params.append(target_project)
         elif allowed_project_ids is not None:
             placeholders = ",".join("?" for _ in allowed_project_ids)
-            wheres.append(f"(project_id IN ({placeholders}) OR project_id IS NULL)")
+            wheres.append(f"project_id IN ({placeholders})")
             params.extend(list(allowed_project_ids))
 
         where_clause = f"WHERE {' AND '.join(wheres)}" if wheres else ""
@@ -424,18 +448,19 @@ def get_workspace_metrics(
             """,
             tuple(params),
         )
-        total_cur = conn.execute(f"SELECT count(*) FROM runs {where_clause};", tuple(params))
-
         status_counts = {row[0]: row[1] for row in cursor.fetchall()}
-        total_runs = total_cur.fetchone()[0]
+        total_runs = sum(status_counts.values())
 
         if allowed_project_ids is not None:
             active_projects_count = len(allowed_project_ids)
         else:
-            proj_cur = conn.execute("SELECT count(*) FROM project_keys WHERE is_active = 1;")
-            active_projects_count = proj_cur.fetchone()[0]
+            try:
+                from ichnoscope.projects import list_projects
+                active_projects_count = len([p for p in list_projects() if p.is_active])
+            except Exception:
+                active_projects_count = 1
 
-    return {
+    res = {
         "total_runs": total_runs,
         "staged_raw_count": status_counts.get("staged_raw", 0),
         "staged_draft_count": status_counts.get("staged_draft", 0),
@@ -445,3 +470,5 @@ def get_workspace_metrics(
         "avg_triage_latency_ms": 245.0,
         "project_id": target_project or "ALL_PROJECTS",
     }
+    _METRICS_CACHE[cache_key] = (now, res)
+    return res

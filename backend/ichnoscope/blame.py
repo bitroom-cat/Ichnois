@@ -191,14 +191,20 @@ def find_culprit(
         return _build_stub_result(incident, settings)
 
     # Dynamic project / GitHub App installation token lookup
+    window_hours = settings.window_hours
     if project_id and not (token_override and repo_override):
         try:
             from ichnoscope.projects import get_project
             from ichnoscope.github_app import get_github_app_service
             proj = get_project(project_id)
-            if proj and proj.github_installation_id and proj.github_repo:
-                repo_override = proj.github_repo
-                token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+            if proj:
+                if proj.github_installation_id and proj.github_repo:
+                    repo_override = proj.github_repo
+                    token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+                elif proj.github_repo or proj.github_repo_override:
+                    repo_override = proj.github_repo or proj.github_repo_override
+                if proj.window_hours:
+                    window_hours = proj.window_hours
         except Exception as exc:
             logger.warning("Could not resolve dynamic GitHub App installation for project %s: %s", project_id, exc)
 
@@ -223,7 +229,7 @@ def find_culprit(
 
     try:
         ref = incident.release_sha or "HEAD"
-        window_start = incident.occurred_at - timedelta(hours=settings.window_hours)
+        window_start = incident.occurred_at - timedelta(hours=window_hours)
 
         # 2. Try GraphQL blame query at release_sha
         gql_headers = {

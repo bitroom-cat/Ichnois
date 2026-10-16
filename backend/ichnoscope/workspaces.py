@@ -1,4 +1,4 @@
-﻿"""Multi-tenant Workspace & User Management Service for Ichnoscope."""
+"""Multi-tenant Workspace & User Management Service for Ichnoscope."""
 
 from __future__ import annotations
 
@@ -31,6 +31,9 @@ class WorkspaceMember(BaseModel):
     created_at: float = Field(default_factory=time.time)
 
 
+_USER_WORKSPACE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
 def ensure_user_workspace(
     user_id: str,
     email: str,
@@ -38,10 +41,17 @@ def ensure_user_workspace(
     db_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Ensure user profile, personal multi-tenant workspace, and isolated default project exist."""
-    init_db(db_path)
-    now = time.time()
     clean_uid = user_id.strip()
     clean_email = email.strip()
+    now = time.time()
+
+    # Fast in-memory lookup if recently verified within 5 minutes
+    if db_path is None and clean_uid in _USER_WORKSPACE_CACHE:
+        cached_ts, cached_ws = _USER_WORKSPACE_CACHE[clean_uid]
+        if now - cached_ts < 300.0:
+            return cached_ws
+
+    init_db(db_path)
     calc_name = display_name or clean_email.split("@")[0]
 
     with get_db(db_path) as conn:
@@ -80,7 +90,10 @@ def ensure_user_workspace(
                     """,
                     (f"mem_{uuid.uuid4().hex[:12]}", ws_id, "root", clean_uid, now),
                 )
-            return {"workspace_id": ws_id, "name": ws_name, "owner_id": ws_owner}
+            result = {"workspace_id": ws_id, "name": ws_name, "owner_id": ws_owner}
+            if db_path is None:
+                _USER_WORKSPACE_CACHE[clean_uid] = (now, result)
+            return result
 
         # 3. Create a unique personal workspace
         ws_id = f"ws_{clean_uid.replace('-', '')[:12]}"
@@ -119,7 +132,10 @@ def ensure_user_workspace(
         )
 
         logger.info("Initialized workspace '%s' (%s) with default project '%s' for user '%s'", ws_name, ws_id, default_pid, clean_uid)
-        return {"workspace_id": ws_id, "name": ws_name, "owner_id": clean_uid}
+        result = {"workspace_id": ws_id, "name": ws_name, "owner_id": clean_uid}
+        if db_path is None:
+            _USER_WORKSPACE_CACHE[clean_uid] = (now, result)
+        return result
 
 
 def get_user_workspace_id(user_id: str, db_path: Path | str | None = None) -> str:

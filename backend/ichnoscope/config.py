@@ -252,7 +252,6 @@ class Settings(BaseModel):
             "github_repo_name": self.github_repo_name,
             "sentry_client_secret": "configured" if self.sentry_client_secret is not None else "missing",
             "slack_webhook_url": "configured" if self.slack_webhook_url is not None else "missing",
-            "admin_token": "configured" if self.admin_token is not None else "missing",
             "internal_gateway_secret": "configured" if self.internal_gateway_secret is not None else "missing",
             "automation_mode": self.automation_mode,
             "fallback_assignee": self.fallback_assignee,
