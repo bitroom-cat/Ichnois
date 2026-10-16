@@ -158,6 +158,8 @@ export interface ProjectUpdateInput {
   rate_limit_min?: number;
   github_repo_override?: string | null;
   slack_channel_override?: string | null;
+  github_installation_id?: string | null;
+  github_repo?: string | null;
   webhook_url?: string | null;
   fallback_assignee?: string | null;
   path_prefix_strip?: string | null;

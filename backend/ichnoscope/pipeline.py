@@ -184,7 +184,7 @@ def execute_investigation(
         log("dedupe", f"Claimed new incident fingerprint: {fp}")
 
         state.status = "blaming"
-        blame_res = find_culprit(incident, settings=settings, client=http_client)
+        blame_res = find_culprit(incident, settings=settings, client=http_client, project_id=state.project_id)
         state.culprit = blame_res.culprit
         if blame_res.culprit:
             log(
@@ -233,13 +233,17 @@ def execute_investigation(
         log("severity", f"Rated severity: {severity} ({severity_reason})")
 
         repo = settings.github_repository
+        fallback_assignee = settings.fallback_assignee
         if state.project_id:
             try:
                 from ichnoscope.projects import get_project
 
                 proj = get_project(state.project_id, db_path=db_path)
-                if proj and proj.github_repo_override:
-                    repo = proj.github_repo_override
+                if proj:
+                    if proj.github_repo or proj.github_repo_override:
+                        repo = proj.github_repo or proj.github_repo_override
+                    if proj.fallback_assignee:
+                        fallback_assignee = proj.fallback_assignee
             except Exception:
                 pass
 
@@ -252,7 +256,7 @@ def execute_investigation(
             fingerprint=fp,
             is_regression=state.is_regression,
             repo=repo,
-            fallback_assignee=settings.fallback_assignee,
+            fallback_assignee=fallback_assignee,
         )
         if not state.draft_title_override:
             state.draft_title_override = draft.title

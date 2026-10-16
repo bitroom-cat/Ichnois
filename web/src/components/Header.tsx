@@ -36,8 +36,8 @@ interface HeaderProps {
 export function Header({ onOpenSearch }: HeaderProps) {
   const pathname = usePathname();
   const router = useRouter();
-  const { theme, toggleTheme } = useTheme();
-  const { activeWorkspace, projects, selectWorkspace } = useWorkspace();
+  const { theme, toggleTheme, mounted } = useTheme();
+  const { currentWorkspace, activeWorkspace, projects, selectWorkspace } = useWorkspace();
 
   const [replayModalOpen, setReplayModalOpen] = useState(false);
   const [replaying, setReplaying] = useState(false);
@@ -187,10 +187,14 @@ export function Header({ onOpenSearch }: HeaderProps) {
             onClick={toggleTheme}
             type="button"
             className="p-1.5 rounded-md hover:bg-hover text-text-secondary hover:text-text-primary transition-colors shrink-0"
-            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={mounted ? (theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode') : 'Toggle theme'}
             aria-label="Toggle theme"
           >
-            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4 text-purple-600" />}
+            {mounted ? (
+              theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-purple-600" />
+            ) : (
+              <span className="w-4 h-4 block" />
+            )}
           </button>
 
           {/* Help & Docs Link */}

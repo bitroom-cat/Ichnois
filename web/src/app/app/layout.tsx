@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import * as React from 'react';
 import { Header } from '@/components/Header';
@@ -14,12 +14,14 @@ export default function DashboardLayout({
 
   return (
     <WorkspaceProvider>
-      <div className="min-h-screen bg-canvas text-text-primary flex flex-col font-sans">
+      <div className="h-screen h-[100dvh] bg-canvas text-text-primary flex flex-col font-sans overflow-hidden">
         {/* Top Bar with Breadcrumbs & Workspace Switcher */}
-        <Header />
+        <div className="shrink-0 z-30">
+          <Header />
+        </div>
 
-        {/* Body Layout: Left Sidebar + Main Content */}
-        <div className="flex-1 flex overflow-hidden">
+        {/* Body Layout: Fixed Left Sidebar + Scrollable Main Content */}
+        <div className="flex-1 flex overflow-hidden min-h-0">
           <Sidebar
             collapsed={collapsed}
             onToggleCollapse={() => setCollapsed(!collapsed)}
@@ -28,7 +30,7 @@ export default function DashboardLayout({
           />
 
           {/* Scrollable Work Area */}
-          <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 bg-canvas">
+          <main className="flex-1 overflow-y-auto min-w-0 p-4 sm:p-6 lg:p-8 bg-canvas">
             <div className="max-w-[1240px] mx-auto">
               {children}
             </div>

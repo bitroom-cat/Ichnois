@@ -639,6 +639,8 @@ class ProjectUpdateRequest(BaseModel):
     rate_limit_min: int | None = None
     github_repo_override: str | None = None
     slack_channel_override: str | None = None
+    github_installation_id: str | None = None
+    github_repo: str | None = None
     fallback_assignee: str | None = None
     path_prefix_strip: str | None = None
     window_hours: int | None = None

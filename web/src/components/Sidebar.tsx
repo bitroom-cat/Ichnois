@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import React from 'react';
 import Link from 'next/link';
@@ -148,7 +148,7 @@ export function Sidebar({
 
   return (
     <aside
-      className={`relative flex flex-col border-r border-border-subtle bg-surface/50 backdrop-blur-sm transition-all duration-200 select-none ${
+      className={`relative flex flex-col h-full shrink-0 min-h-0 border-r border-border-subtle bg-surface/50 backdrop-blur-sm transition-all duration-200 select-none ${
         collapsed ? 'w-16' : 'w-60'
       }`}
     >
