@@ -6,6 +6,7 @@ Safe to import with no environment variables set; reads environment lazily via l
 import functools
 import os
 from collections.abc import Mapping
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr, SecretStr
 
@@ -383,6 +384,9 @@ def get_settings() -> Settings:
         from dotenv import load_dotenv
 
         load_dotenv()
+        root_dir = Path(__file__).resolve().parents[2]
+        load_dotenv(root_dir / "backend" / ".env")
+        load_dotenv(root_dir / ".env")
     except ImportError:
         pass
     return load_settings(os.environ)

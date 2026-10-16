@@ -37,7 +37,14 @@ class GitHubAppService:
         private_key_path: str | Path | None = None,
         private_key_bytes: bytes | None = None,
     ) -> None:
-        self.app_id = str(app_id or os.getenv("GITHUB_APP_ID") or "").strip()
+        if not app_id:
+            try:
+                from ichnoscope.config import get_settings
+                self.app_id = str(get_settings().github_app_id or os.getenv("GITHUB_APP_ID") or "").strip()
+            except Exception:
+                self.app_id = str(os.getenv("GITHUB_APP_ID") or "").strip()
+        else:
+            self.app_id = str(app_id).strip()
         self._private_key_bytes: bytes | None = private_key_bytes
         self._private_key_path = Path(private_key_path) if private_key_path else None
         self._loaded_private_key: Any = None
