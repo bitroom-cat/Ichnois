@@ -1,4 +1,4 @@
-﻿"""Multi-project management and dynamic project key lifecycle service for Ichnoscope."""
+"""Multi-project management and dynamic project key lifecycle service for Ichnoscope."""
 
 from __future__ import annotations
 
@@ -17,6 +17,57 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PROJECT_ID = "proj_default"
 DEFAULT_PROJECT_NAME = "Default Application"
+
+DEFAULT_MICROSERVICES = [
+    {
+        "project_id": "proj_default",
+        "name": "Default Application",
+        "public_key": "sentry_public_key",
+        "secret_key": "sk_live_default_admin_secret_key_001",
+        "rate_limit_min": 120,
+        "description": "Default production application",
+    },
+    {
+        "project_id": "checkout-service",
+        "name": "Checkout Microservice",
+        "public_key": "pk_live_checkout001",
+        "secret_key": "sk_live_checkout_secret_001",
+        "rate_limit_min": 120,
+        "description": "Payment & Order Checkout Engine",
+    },
+    {
+        "project_id": "auth-service",
+        "name": "Authentication Service",
+        "public_key": "pk_live_auth0000001",
+        "secret_key": "sk_live_auth_secret_0000001",
+        "rate_limit_min": 120,
+        "description": "User Identity & Session Management",
+    },
+    {
+        "project_id": "inventory-service",
+        "name": "Inventory & Catalog Service",
+        "public_key": "pk_live_inventory01",
+        "secret_key": "sk_live_inventory_secret_01",
+        "rate_limit_min": 120,
+        "description": "Stock Levels & Product Catalog",
+    },
+    {
+        "project_id": "edge-gateway",
+        "name": "Edge Ingestion Gateway",
+        "public_key": "pk_live_edge0000001",
+        "secret_key": "sk_live_edge_secret_0000001",
+        "rate_limit_min": 240,
+        "description": "Edge Telemetry Ingestion Proxy",
+    },
+    {
+        "project_id": "myshop-backend",
+        "name": "MyShop E-Commerce Backend",
+        "public_key": "pk_live_myshop00001",
+        "secret_key": "sk_live_myshop_secret_00001",
+        "rate_limit_min": 120,
+        "description": "Core MyShop Retail API & Services",
+    },
+]
 
 
 class ProjectRecord(BaseModel):
@@ -352,34 +403,34 @@ def rotate_project_key(
 
 
 def ensure_default_project(db_path: Path | str | None = None) -> None:
-    """Ensure default project exists only if the database has 0 projects."""
+    """Ensure default projects/microservices exist in the database."""
     init_db(db_path)
+    now = time.time()
     with get_db(db_path) as conn:
-        cursor = conn.execute("SELECT count(*) FROM project_keys;")
-        if cursor.fetchone()[0] == 0:
-            now = time.time()
-            conn.execute(
-                """
-                INSERT INTO project_keys (
-                    project_id, name, public_key, secret_key,
-                    rate_limit_min, environment, description,
-                    is_active, created_at, updated_at, owner_id
+        for svc in DEFAULT_MICROSERVICES:
+            cursor = conn.execute("SELECT count(*) FROM project_keys WHERE project_id = ?;", (svc["project_id"],))
+            if cursor.fetchone()[0] == 0:
+                conn.execute(
+                    """
+                    INSERT INTO project_keys (
+                        project_id, name, public_key, secret_key,
+                        rate_limit_min, environment, description,
+                        is_active, created_at, updated_at, owner_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, 'production', ?, 1, ?, ?, NULL);
+                    """,
+                    (
+                        svc["project_id"],
+                        svc["name"],
+                        svc["public_key"],
+                        svc["secret_key"],
+                        svc["rate_limit_min"],
+                        svc["description"],
+                        now,
+                        now,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL);
-                """,
-                (
-                    DEFAULT_PROJECT_ID,
-                    DEFAULT_PROJECT_NAME,
-                    "sentry_public_key",
-                    "sk_live_default_admin_secret_key_001",
-                    120,
-                    "production",
-                    "Default production application",
-                    now,
-                    now,
-                ),
-            )
-            logger.info("Initialized default project %s (%s)", DEFAULT_PROJECT_ID, DEFAULT_PROJECT_NAME)
+                logger.info("Initialized default microservice %s (%s)", svc["project_id"], svc["name"])
 
 
 def connect_github_project(

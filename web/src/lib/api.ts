@@ -157,6 +157,7 @@ export function setSelectedProjectId(projectId: string): void {
 
 export interface RunItem {
   id: string;
+  project_id?: string;
   status: any;
   severity: any;
   fingerprint: string;
@@ -315,6 +316,7 @@ function formatBackendRun(b: any): RunItem {
 
   return {
     id: b.id,
+    project_id: b.project_id || b.projectId || inc.project_id || undefined,
     status:
       b.status === 'staged_raw'
         ? 'staged_raw'
@@ -412,6 +414,7 @@ function saveStoredRuns(runs: RunDetail[]) {
 function toRunItem(r: any): RunItem {
   return {
     id: r.id,
+    project_id: r.project_id || r.projectId || 'checkout-service',
     status:
       r.status === 'staged_raw'
         ? 'staged_raw'
@@ -574,6 +577,13 @@ export const api = {
       }
     } catch {
       // Backend not running
+    }
+
+    // Fallback: check locally stored runs
+    const runs = getStoredRuns();
+    const found = runs.find((r) => r.id === id);
+    if (found) {
+      return toRunItem(found);
     }
 
     return null;
@@ -1031,9 +1041,13 @@ export const api = {
     }
   },
 
-  replaySavedFixture: async (fixture: string): Promise<any> => {
+  replaySavedFixture: async (fixture: string, projectId?: string): Promise<any> => {
     try {
-      const res = await apiFetch(`${BACKEND_URL}/api/runs/replay?fixture=${encodeURIComponent(fixture)}`, {
+      let endpoint = `${BACKEND_URL}/api/runs/replay?fixture=${encodeURIComponent(fixture)}`;
+      if (projectId && projectId !== 'global') {
+        endpoint += `&project_id=${encodeURIComponent(projectId)}`;
+      }
+      const res = await apiFetch(endpoint, {
         method: 'POST',
       });
       if (res.ok) {
@@ -1046,10 +1060,11 @@ export const api = {
 
     const runs = getStoredRuns();
     const newRun = {
-      ...runs[0],
+      ...(runs[0] || {}),
       id: `run-${Date.now().toString(36)}`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      project_id: projectId && projectId !== 'global' ? projectId : undefined,
     };
     runs.unshift(newRun);
     saveStoredRuns(runs);

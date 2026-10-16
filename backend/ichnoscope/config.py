@@ -390,3 +390,4 @@ def get_settings() -> Settings:
     except ImportError:
         pass
     return load_settings(os.environ)
+    return load_settings(os.environ)

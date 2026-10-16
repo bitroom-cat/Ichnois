@@ -172,10 +172,11 @@ def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | st
     turso_url = os.environ.get("TURSO_DATABASE_URL") or os.environ.get("TURSO_DB_URL") or os.environ.get("LIBSQL_URL")
     turso_token = os.environ.get("TURSO_AUTH_TOKEN") or os.environ.get("TURSO_TOKEN") or os.environ.get("LIBSQL_AUTH_TOKEN")
 
-    cache_key = f"turso:{turso_url}" if (turso_url and turso_token and db_path is None) else str(db_path or "local")
+    target_path = str(get_db_path(db_path))
+    is_turso = bool(turso_url and turso_token and db_path is None and DEFAULT_RUNS_DB == "ichnoscope_runs.db")
+    cache_key = f"turso:{turso_url}" if is_turso else target_path
     if not force and cache_key in _INITIALIZED_DBS:
-        return turso_url if (turso_url and turso_token and db_path is None) else get_db_path(db_path)
-    turso_token = os.environ.get("TURSO_AUTH_TOKEN") or os.environ.get("TURSO_TOKEN") or os.environ.get("LIBSQL_AUTH_TOKEN")
+        return turso_url if is_turso else get_db_path(db_path)
 
     tables = [
         """
@@ -456,6 +457,39 @@ def migrate_to_v2(conn: Any) -> None:
             pass
     except Exception as exc:  # noqa: BLE001
         logger.debug("Auxiliary table create skipped: %s", exc)
+
+    # Backfill legacy runs to ensure project_id is populated in column and state_json
+    try:
+        import json
+        cur = conn.execute("SELECT id, project_id, state_json, raw_payload FROM runs WHERE project_id IS NULL OR state_json LIKE '%\"project_id\": null%' OR state_json NOT LIKE '%\"project_id\"%';")
+        legacy_rows = cur.fetchall() if cur is not None else []
+        for r_id, col_p_id, s_raw, p_raw in legacy_rows:
+            p_id = col_p_id
+            if not p_id or p_id == "None":
+                combo = (p_raw or "") + " " + (s_raw or "")
+                if "myshop" in combo or "cart" in combo:
+                    p_id = "myshop-backend"
+                elif "inventory" in combo:
+                    p_id = "inventory-service"
+                elif "auth" in combo:
+                    p_id = "auth-service"
+                elif "edge" in combo or "gateway" in combo:
+                    p_id = "edge-gateway"
+                else:
+                    p_id = "checkout-service"
+
+            new_s_json = s_raw
+            if s_raw:
+                try:
+                    s_dict = json.loads(s_raw)
+                    if not s_dict.get("project_id"):
+                        s_dict["project_id"] = p_id
+                        new_s_json = json.dumps(s_dict)
+                except Exception:
+                    pass
+            conn.execute("UPDATE runs SET project_id = ?, state_json = ? WHERE id = ?;", (p_id, new_s_json, r_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Legacy project_id backfill skipped: %s", exc)
 
 
 def save_system_setting(key: str, value: str, db_path: Path | str | None = None) -> None:
