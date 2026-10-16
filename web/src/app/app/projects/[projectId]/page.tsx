@@ -35,7 +35,7 @@ export default function ProjectWorkspaceHubPage() {
   const router = useRouter();
   const projectId = (params?.projectId as string) || '';
 
-  const { projects, selectWorkspace, refreshMetrics } = useWorkspace();
+  const { projects, selectWorkspace, refreshMetrics, authorizedUsers } = useWorkspace();
   const [project, setProject] = useState<Project | null>(null);
   const [runs, setRuns] = useState<RunItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -295,6 +295,38 @@ Sentry.init({
       </div>
 
       {/* Scoped Incidents Queue */}
+      {/* Authorized Workspace Members */}
+      <div className="p-6 rounded-2xl border border-border-subtle bg-surface/50 backdrop-blur-sm space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-emerald-500" />
+            <h2 className="text-base font-bold text-text-primary">Authorized Workspace Members</h2>
+          </div>
+          <span className="text-xs text-text-muted">{authorizedUsers.length} authorized user{authorizedUsers.length === 1 ? '' : 's'}</span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+          {authorizedUsers.map((member) => (
+            <div
+              key={member.user_id}
+              className="flex items-center justify-between p-3 rounded-xl border border-border-subtle bg-canvas/60"
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-full bg-purple-500/20 text-purple-400 font-bold flex items-center justify-center text-xs shrink-0">
+                  {member.display_name.slice(0, 2).toUpperCase()}
+                </div>
+                <div className="truncate">
+                  <div className="text-xs font-semibold text-text-primary truncate">{member.display_name}</div>
+                  <div className="text-[11px] text-text-muted truncate">{member.email}</div>
+                </div>
+              </div>
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                {member.role}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div>

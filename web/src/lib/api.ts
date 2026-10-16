@@ -1173,4 +1173,45 @@ export const api = {
     }
     return res.json();
   },
+
+  getWorkspaceUsers: async (): Promise<WorkspaceMember[]> => {
+    try {
+      const res = await apiFetch(`${BACKEND_URL}/api/workspace/users`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) return data;
+      }
+    } catch {
+      // Fallback
+    }
+    return [];
+  },
+
+  getUserWorkspaces: async (): Promise<WorkspaceItem[]> => {
+    try {
+      const res = await apiFetch(`${BACKEND_URL}/api/workspaces`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) return data;
+      }
+    } catch {
+      // Fallback
+    }
+    return [];
+  },
 };
+
+export interface WorkspaceMember {
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: 'owner' | 'admin' | 'editor' | 'viewer';
+  created_at?: number;
+}
+
+export interface WorkspaceItem {
+  workspace_id: string;
+  name: string;
+  owner_id: string;
+  created_at: number;
+}

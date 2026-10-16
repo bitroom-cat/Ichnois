@@ -20,9 +20,19 @@ def save_run(
     ts = now if now is not None else time.time()
     state_json = json.dumps(state.model_dump(mode="json"))
 
-    proj_id = getattr(state, "project_id", None) or (state.payload.get("project_id") if isinstance(state.payload, dict) else None) or "checkout-service"
+    proj_id = getattr(state, "project_id", None) or (state.payload.get("project_id") if isinstance(state.payload, dict) else None)
 
     with get_db(db_path) as conn:
+        ws_id = None
+        if proj_id:
+            try:
+                ws_cur = conn.execute("SELECT workspace_id FROM project_keys WHERE project_id = ? LIMIT 1;", (proj_id,))
+                ws_row = ws_cur.fetchone()
+                if ws_row and ws_row[0]:
+                    ws_id = ws_row[0]
+            except Exception:
+                pass
+
         cursor = conn.execute("SELECT created_at FROM runs WHERE id = ?;", (run_id,))
         row = cursor.fetchone()
         raw_payload = json.dumps(state.payload)
@@ -32,7 +42,7 @@ def save_run(
                 UPDATE runs
                 SET fingerprint = ?, status = ?, severity = ?, is_regression = ?,
                     issue_url = ?, draft_title = ?, draft_body = ?, raw_payload = ?,
-                    project_id = ?, state_json = ?, updated_at = ?
+                    project_id = ?, workspace_id = ?, state_json = ?, updated_at = ?
                 WHERE id = ?;
                 """,
                 (
@@ -45,6 +55,7 @@ def save_run(
                     state.draft_body_override,
                     raw_payload,
                     proj_id,
+                    ws_id,
                     state_json,
                     ts,
                     run_id,
@@ -55,9 +66,9 @@ def save_run(
                 """
                 INSERT INTO runs (
                     id, fingerprint, status, severity, is_regression, issue_url,
-                    draft_title, draft_body, raw_payload, project_id, state_json, created_at, updated_at
+                    draft_title, draft_body, raw_payload, project_id, workspace_id, state_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     run_id,
@@ -70,6 +81,7 @@ def save_run(
                     state.draft_body_override,
                     raw_payload,
                     proj_id,
+                    ws_id,
                     state_json,
                     ts,
                     ts,

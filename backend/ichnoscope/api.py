@@ -74,8 +74,9 @@ def api_list_runs(
     }
     from ichnoscope.projects import list_projects
     user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
-    user_projects = [p.project_id for p in list_projects(owner_id=user_id, is_admin=is_admin)]
+    user_projects = [p.project_id for p in list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)]
 
     raw_runs = list_runs(
         limit=limit,
@@ -101,10 +102,11 @@ def api_get_run(run_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
     user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
-    if not is_admin and user_id:
+    if not is_admin and (user_id or workspace_id):
         from ichnoscope.projects import list_projects
-        user_projects = {p.project_id for p in list_projects(owner_id=user_id, is_admin=is_admin)}
+        user_projects = {p.project_id for p in list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)}
         if state.project_id and state.project_id not in user_projects:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
@@ -601,21 +603,23 @@ class ProjectUpdateRequest(BaseModel):
 
 @router.get("/projects")
 def api_list_projects(request: Request) -> list[dict[str, Any]]:
-    """List all registered projects with credentials and metadata for current user."""
+    """List all registered projects with credentials and metadata for current workspace."""
     from ichnoscope.projects import list_projects
 
     user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
-    projects = list_projects(owner_id=user_id, is_admin=is_admin)
+    projects = list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)
     return [p.to_safe_dict() for p in projects]
 
 
 @router.post("/projects")
 def api_create_project(req: ProjectCreateRequest, request: Request) -> dict[str, Any]:
-    """Register a new application project and issue public/secret API keys for current user."""
+    """Register a new application project and issue API keys for current workspace."""
     from ichnoscope.projects import create_project
 
     user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
     project = create_project(
         name=req.name,
         environment=req.environment,
@@ -623,6 +627,7 @@ def api_create_project(req: ProjectCreateRequest, request: Request) -> dict[str,
         github_repo_override=req.github_repo_override,
         slack_channel_override=req.slack_channel_override,
         owner_id=user_id,
+        workspace_id=workspace_id,
     )
     return project.model_dump()
 
@@ -633,8 +638,9 @@ def api_get_project(project_id: str, request: Request) -> dict[str, Any]:
     from ichnoscope.projects import get_project
 
     user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
-    project = get_project(project_id, owner_id=user_id, is_admin=is_admin)
+    project = get_project(project_id, owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     return project.to_safe_dict()
@@ -646,11 +652,13 @@ def api_update_project(project_id: str, req: ProjectUpdateRequest, request: Requ
     from ichnoscope.projects import update_project
 
     user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
     updated = update_project(
         project_id,
         req.model_dump(exclude_unset=True),
         owner_id=user_id,
+        workspace_id=workspace_id,
         is_admin=is_admin,
     )
     if not updated:
@@ -664,8 +672,9 @@ def api_delete_project(project_id: str, request: Request) -> dict[str, Any]:
     from ichnoscope.projects import delete_project
 
     user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
-    ok = delete_project(project_id, owner_id=user_id, is_admin=is_admin)
+    ok = delete_project(project_id, owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)
     if not ok:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found or access denied")
     return {"status": "deleted", "project_id": project_id}
@@ -677,8 +686,9 @@ def api_rotate_project_key(project_id: str, request: Request) -> dict[str, Any]:
     from ichnoscope.projects import rotate_project_key
 
     user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
-    project = rotate_project_key(project_id, owner_id=user_id, is_admin=is_admin)
+    project = rotate_project_key(project_id, owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found or access denied")
     return project.model_dump()
@@ -755,8 +765,9 @@ def api_get_workspace_metrics(
     from ichnoscope.store import get_workspace_metrics
 
     user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
     is_admin = getattr(request.state, "is_admin", False)
-    user_projects = [p.project_id for p in list_projects(owner_id=user_id, is_admin=is_admin)]
+    user_projects = [p.project_id for p in list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)]
     return get_workspace_metrics(
         project_id=project_id,
         allowed_project_ids=None if is_admin else user_projects,
@@ -899,3 +910,37 @@ def api_remove_project_member(project_id: str, user_id: str) -> dict[str, Any]:
         )
     return {"status": "removed", "project_id": project_id, "user_id": user_id}
 
+
+
+@router.get("/workspace/users")
+def api_get_workspace_users(request: Request) -> list[dict[str, Any]]:
+    """Return authorized users/members belonging to the caller's workspace."""
+    from ichnoscope.workspaces import list_workspace_members, get_user_workspace_id
+
+    workspace_id = getattr(request.state, "workspace_id", None)
+    user_id = getattr(request.state, "user_id", None)
+    if not workspace_id and user_id:
+        workspace_id = get_user_workspace_id(user_id)
+
+    if not workspace_id:
+        user_email = getattr(request.state, "user_email", "admin@ichnoscope.internal")
+        return [{
+            "user_id": user_id or "admin",
+            "role": "owner" if getattr(request.state, "is_admin", False) else "viewer",
+            "email": user_email,
+            "display_name": user_email.split("@")[0] if "@" in user_email else "Admin",
+            "created_at": 0.0,
+        }]
+
+    return list_workspace_members(workspace_id)
+
+
+@router.get("/workspaces")
+def api_get_user_workspaces(request: Request) -> list[dict[str, Any]]:
+    """List all workspaces for the authenticated user."""
+    from ichnoscope.workspaces import list_user_workspaces
+
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        return []
+    return list_user_workspaces(user_id)

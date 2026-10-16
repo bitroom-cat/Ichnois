@@ -15,6 +15,8 @@ import {
   api,
   Project,
   WorkspaceMetrics,
+  WorkspaceMember,
+  WorkspaceItem,
   getSelectedProjectId,
   setSelectedProjectId,
 } from '@/lib/api';
@@ -25,10 +27,13 @@ export interface WorkspaceContextType {
   activeProject: Project | null;
   projects: Project[];
   metrics: WorkspaceMetrics | null;
+  authorizedUsers: WorkspaceMember[];
+  userWorkspaces: WorkspaceItem[];
   loading: boolean;
   error: string | null;
   refreshMetrics: () => Promise<void>;
   refreshProjects: () => Promise<void>;
+  refreshUsers: () => Promise<void>;
   selectWorkspace: (workspace: 'global' | string) => void;
 }
 
@@ -38,10 +43,13 @@ const defaultWorkspaceContext: WorkspaceContextType = {
   activeProject: null,
   projects: [],
   metrics: null,
+  authorizedUsers: [],
+  userWorkspaces: [],
   loading: false,
   error: null,
   refreshMetrics: async () => {},
   refreshProjects: async () => {},
+  refreshUsers: async () => {},
   selectWorkspace: () => {},
 };
 
@@ -70,6 +78,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [metrics, setMetrics] = useState<WorkspaceMetrics | null>(null);
+  const [authorizedUsers, setAuthorizedUsers] = useState<WorkspaceMember[]>([]);
+  const [userWorkspaces, setUserWorkspaces] = useState<WorkspaceItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -99,12 +109,23 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, [isGlobal, currentWorkspace]);
 
+  const refreshUsers = useCallback(async () => {
+    try {
+      const users = await api.getWorkspaceUsers();
+      setAuthorizedUsers(users);
+      const ws = await api.getUserWorkspaces();
+      setUserWorkspaces(ws);
+    } catch (err) {
+      console.error('Failed to load workspace users:', err);
+    }
+  }, []);
+
   // Initial load
   useEffect(() => {
     let mounted = true;
     const init = async () => {
       setLoading(true);
-      await refreshProjects();
+      await Promise.all([refreshProjects(), refreshUsers()]);
       if (mounted) setLoading(false);
     };
     init();
@@ -172,10 +193,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       activeProject,
       projects,
       metrics,
+      authorizedUsers,
+      userWorkspaces,
       loading,
       error,
       refreshMetrics,
       refreshProjects,
+      refreshUsers,
       selectWorkspace,
     }),
     [
@@ -184,10 +208,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       activeProject,
       projects,
       metrics,
+      authorizedUsers,
+      userWorkspaces,
       loading,
       error,
       refreshMetrics,
       refreshProjects,
+      refreshUsers,
       selectWorkspace,
     ]
   );

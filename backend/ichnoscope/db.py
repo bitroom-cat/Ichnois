@@ -179,6 +179,14 @@ def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | st
 
     tables = [
         """
+        CREATE TABLE IF NOT EXISTS workspaces (
+            workspace_id TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            owner_id     TEXT NOT NULL,
+            created_at   REAL NOT NULL
+        );
+        """,
+        """
         CREATE TABLE IF NOT EXISTS runs (
             id TEXT PRIMARY KEY,
             fingerprint TEXT NOT NULL,
@@ -190,6 +198,7 @@ def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | st
             draft_body TEXT,
             raw_payload TEXT,
             project_id TEXT,
+            workspace_id TEXT,
             state_json TEXT NOT NULL,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
@@ -252,6 +261,7 @@ def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | st
             webhook_url TEXT,
             updated_at REAL,
             owner_id TEXT,
+            workspace_id TEXT,
             is_active INTEGER DEFAULT 1,
             created_at REAL NOT NULL
         );
@@ -276,12 +286,12 @@ def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | st
         """
         CREATE TABLE IF NOT EXISTS team_members (
             id          TEXT PRIMARY KEY,
-            project_id  TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            project_id  TEXT,
             user_id     TEXT NOT NULL,
             role        TEXT NOT NULL DEFAULT 'viewer',
             invited_by  TEXT,
-            created_at  REAL NOT NULL,
-            UNIQUE(project_id, user_id)
+            created_at  REAL NOT NULL
         );
         """,
         """
@@ -301,6 +311,10 @@ def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | st
         "CREATE INDEX IF NOT EXISTS idx_gate_reviews_run ON gate_reviews (run_id, gate);",
         "CREATE INDEX IF NOT EXISTS idx_project_keys_public ON project_keys (public_key);",
         "CREATE INDEX IF NOT EXISTS idx_team_members_project ON team_members (project_id);",
+        "CREATE INDEX IF NOT EXISTS idx_workspaces_owner ON workspaces (owner_id);",
+        "CREATE INDEX IF NOT EXISTS idx_project_keys_ws ON project_keys (workspace_id);",
+        "CREATE INDEX IF NOT EXISTS idx_runs_ws ON runs (workspace_id);",
+        "CREATE INDEX IF NOT EXISTS idx_team_members_ws ON team_members (workspace_id, user_id);",
         "CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members (user_id);",
         "CREATE INDEX IF NOT EXISTS idx_team_audit_project ON team_audit_log (project_id, created_at DESC);",
     ]
@@ -333,6 +347,7 @@ def migrate_to_v2(conn: Any) -> None:
         "draft_body": "TEXT",
         "raw_payload": "TEXT",
         "project_id": "TEXT",
+        "workspace_id": "TEXT",
     }
     existing: set[str] = set()
     try:
@@ -396,7 +411,17 @@ def migrate_to_v2(conn: Any) -> None:
             );
             """
         )
-        for col in ["github_repo_override", "slack_channel_override", "github_installation_id", "github_repo", "description", "webhook_url", "updated_at", "owner_id"]:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workspaces (
+                workspace_id TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                owner_id     TEXT NOT NULL,
+                created_at   REAL NOT NULL
+            );
+            """
+        )
+        for col in ["github_repo_override", "slack_channel_override", "github_installation_id", "github_repo", "description", "webhook_url", "updated_at", "owner_id", "workspace_id"]:
             try:
                 conn.execute(f"ALTER TABLE project_keys ADD COLUMN {col} TEXT;")
             except Exception:
@@ -426,15 +451,19 @@ def migrate_to_v2(conn: Any) -> None:
             """
             CREATE TABLE IF NOT EXISTS team_members (
                 id          TEXT PRIMARY KEY,
-                project_id  TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                project_id  TEXT,
                 user_id     TEXT NOT NULL,
                 role        TEXT NOT NULL DEFAULT 'viewer',
                 invited_by  TEXT,
-                created_at  REAL NOT NULL,
-                UNIQUE(project_id, user_id)
+                created_at  REAL NOT NULL
             );
             """
         )
+        try:
+            conn.execute("ALTER TABLE team_members ADD COLUMN workspace_id TEXT;")
+        except Exception:
+            pass
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS team_audit_log (

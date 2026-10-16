@@ -107,9 +107,20 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
                     logger.debug("Live Supabase token verification failed: %s", exc)
 
             if verified_user:
+                u_id = verified_user.get("id")
+                u_email = verified_user.get("email") or "user@ichnoscope.internal"
+                ws_id = None
+                try:
+                    from ichnoscope.workspaces import ensure_user_workspace
+                    ws_info = ensure_user_workspace(user_id=u_id, email=u_email)
+                    ws_id = ws_info.get("workspace_id")
+                except Exception as ws_err:
+                    logger.warning("Error ensuring user workspace: %s", ws_err)
+
                 request.state.is_admin = False
-                request.state.user_id = verified_user.get("id")
-                request.state.user_email = verified_user.get("email")
+                request.state.user_id = u_id
+                request.state.user_email = u_email
+                request.state.workspace_id = ws_id
                 return await call_next(request)
 
         # 2. Admin Token Check (Direct Bearer or X-Admin-Token header)
@@ -119,11 +130,13 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
                 request.state.is_admin = True
                 request.state.user_id = None
                 request.state.user_email = "admin@ichnoscope.internal"
+                request.state.workspace_id = None
                 return await call_next(request)
             if (not token or not token.startswith("ey")) and x_admin_token and hmac.compare_digest(x_admin_token, clean_expected):
                 request.state.is_admin = True
                 request.state.user_id = None
                 request.state.user_email = "admin@ichnoscope.internal"
+                request.state.workspace_id = None
                 return await call_next(request)
 
         # If either auth mechanism is configured and no valid token was provided:
