@@ -30,6 +30,7 @@ asyncpg>=0.29.0
 
 # Security & Signature Verification
 cryptography>=42.0.0
+PyJWT>=2.8.0
 
 # Testing & Development
 pytest>=8.2.0

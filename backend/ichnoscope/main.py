@@ -87,9 +87,26 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
                     verified_user = cached_user
 
             if not verified_user:
-                import jwt as pyjwt
+                claims = {}
                 try:
+                    import jwt as pyjwt
                     claims = pyjwt.decode(token, options={"verify_signature": False})
+                except ImportError:
+                    try:
+                        import base64
+                        import json
+                        parts = token.split(".")
+                        if len(parts) >= 2:
+                            payload_b64 = parts[1]
+                            padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+                            claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+                    except Exception:
+                        claims = {}
+                except Exception as parse_err:
+                    logger.debug("Failed to parse Bearer JWT: %s", parse_err)
+                    claims = {}
+
+                try:
                     exp = claims.get("exp")
                     if exp and exp < now:
                         return JSONResponse(
@@ -99,7 +116,7 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
                     claims_sub = claims.get("sub")
                     claims_email = claims.get("email")
                 except Exception as parse_err:
-                    logger.debug("Failed to parse Bearer JWT: %s", parse_err)
+                    logger.debug("Failed to extract claims from JWT: %s", parse_err)
                     claims_sub = None
                     claims_email = None
 
