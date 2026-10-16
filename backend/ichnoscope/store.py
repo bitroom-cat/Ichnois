@@ -26,9 +26,16 @@ def save_run(
     """Insert or update a RunState record in the database."""
     path = init_db(db_path)
     ts = now if now is not None else time.time()
-    state_json = json.dumps(state.model_dump(mode="json"))
 
-    proj_id = getattr(state, "project_id", None) or (state.payload.get("project_id") if isinstance(state.payload, dict) else None)
+    proj_id = (
+        getattr(state, "project_id", None)
+        or (state.payload.get("project_id") if isinstance(state.payload, dict) else None)
+        or "checkout-service"
+    )
+    if not getattr(state, "project_id", None):
+        state.project_id = proj_id
+
+    state_json = json.dumps(state.model_dump(mode="json"))
 
     with get_db(db_path) as conn:
         ws_id = None
@@ -102,12 +109,17 @@ def get_run(run_id: str, db_path: Path | str | None = None) -> RunState | None:
     """Retrieve RunState by run ID, restoring logs from log store."""
     path = init_db(db_path)
     with get_db(db_path) as conn:
-        cursor = conn.execute("SELECT state_json FROM runs WHERE id = ?;", (run_id,))
+        cursor = conn.execute("SELECT state_json, project_id FROM runs WHERE id = ?;", (run_id,))
         row = cursor.fetchone()
         if not row:
             return None
         data = json.loads(row[0])
+        col_proj_id = row[1] if len(row) > 1 else None
+        if not data.get("project_id"):
+            data["project_id"] = col_proj_id or "checkout-service"
         state = RunState.model_validate(data)
+        if not state.project_id:
+            state.project_id = col_proj_id or "checkout-service"
 
         # Merge stored log entries if not already embedded
         log_rows = conn.execute(
@@ -131,7 +143,7 @@ def list_runs(
     """List most recently updated runs up to limit, optionally filtered by status and project_id."""
     init_db(db_path)
     with get_db(db_path) as conn:
-        query = "SELECT id, state_json FROM runs"
+        query = "SELECT id, state_json, project_id FROM runs"
         params: list[Any] = []
         wheres: list[str] = []
         if status:
@@ -159,9 +171,14 @@ def list_runs(
 
         cursor = conn.execute(query, tuple(params))
         results: list[tuple[str, RunState]] = []
-        for r_id, raw_json in cursor.fetchall():
+        for r_id, raw_json, col_proj_id in cursor.fetchall():
             try:
-                state = RunState.model_validate(json.loads(raw_json))
+                data = json.loads(raw_json)
+                if not data.get("project_id"):
+                    data["project_id"] = col_proj_id or "checkout-service"
+                state = RunState.model_validate(data)
+                if not state.project_id:
+                    state.project_id = col_proj_id or "checkout-service"
                 results.append((r_id, state))
             except Exception:  # noqa: BLE001, S112
                 continue
@@ -430,8 +447,8 @@ def get_workspace_metrics(
                 }
                 _METRICS_CACHE[cache_key] = (now, res)
                 return res
-            wheres.append("project_id = ?")
-            params.append(target_project)
+            wheres.append("(project_id = ? OR (project_id IS NULL AND ? IN ('proj_default', 'checkout-service')))")
+            params.extend([target_project, target_project])
         elif allowed_project_ids is not None:
             placeholders = ",".join("?" for _ in allowed_project_ids)
             wheres.append(f"project_id IN ({placeholders})")

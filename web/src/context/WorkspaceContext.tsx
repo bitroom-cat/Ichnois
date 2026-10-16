@@ -23,6 +23,7 @@ import {
 
 export interface WorkspaceContextType {
   currentWorkspace: 'global' | string;
+  activeWorkspace: 'global' | string;
   isGlobal: boolean;
   activeProject: Project | null;
   projects: Project[];
@@ -39,6 +40,7 @@ export interface WorkspaceContextType {
 
 const defaultWorkspaceContext: WorkspaceContextType = {
   currentWorkspace: 'global',
+  activeWorkspace: 'global',
   isGlobal: true,
   activeProject: null,
   projects: [],
@@ -193,6 +195,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const value = useMemo<WorkspaceContextType>(
     () => ({
       currentWorkspace,
+      activeWorkspace: currentWorkspace,
       isGlobal,
       activeProject,
       projects,

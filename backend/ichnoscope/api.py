@@ -38,7 +38,7 @@ def serialize_run(run_id: str, state: Any) -> dict[str, Any]:
         "fingerprint": state.fingerprint,
         "is_regression": state.is_regression,
         "issue_url": state.issue_url,
-        "project_id": state.project_id,
+        "project_id": state.project_id or "checkout-service",
         "environment": state.environment or (inc.environment if inc else None),
         "exception_type": inc.exception_type if inc else None,
         "error_message": inc.error_message if inc else None,
@@ -102,16 +102,15 @@ def api_list_runs(
     return items
 
 
-@router.get("/runs/{run_id}")
-def api_get_run(run_id: str, request: Request) -> dict[str, Any]:
+def get_run_details(run_id: str, request: Request | None = None) -> dict[str, Any]:
     """Retrieve detailed execution state and audit trail for a run."""
     state = get_run(run_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
-    user_id = getattr(request.state, "user_id", None)
-    workspace_id = getattr(request.state, "workspace_id", None)
-    is_admin = getattr(request.state, "is_admin", False)
+    user_id = getattr(request.state, "user_id", None) if (request and hasattr(request, "state")) else None
+    workspace_id = getattr(request.state, "workspace_id", None) if (request and hasattr(request, "state")) else None
+    is_admin = getattr(request.state, "is_admin", False) if (request and hasattr(request, "state")) else (True if request is None else False)
     if not is_admin:
         if not user_id and not workspace_id:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
@@ -126,6 +125,12 @@ def api_get_run(run_id: str, request: Request) -> dict[str, Any]:
     payload["logs"] = detailed_logs if detailed_logs else state.logs
     payload["gate_reviews"] = list_gate_reviews(run_id)
     return payload
+
+
+@router.get("/runs/{run_id}")
+def api_get_run(run_id: str, request: Request) -> dict[str, Any]:
+    """Retrieve detailed execution state and audit trail for a run."""
+    return get_run_details(run_id, request=request)
 
 
 class RejectRequest(BaseModel):
@@ -546,7 +551,7 @@ def api_get_health() -> list[dict[str, Any]]:
 
 
 @router.post("/runs/{run_id}/rerun")
-def api_rerun_run(run_id: str) -> dict[str, Any]:
+def api_rerun_run(run_id: str, request: Request) -> dict[str, Any]:
     """Re-run triage pipeline explanation for an existing run."""
     state = get_run(run_id)
     if not state or not state.incident:
@@ -559,15 +564,18 @@ def api_rerun_run(run_id: str) -> dict[str, Any]:
     state.explanation = exp_res.explanation
     state.logs.append(f"[INFO] admin: Re-ran triage explanation via {exp_res.provider or 'stub'}")
     save_run(run_id, state)
-    return api_get_run(run_id)
+    return get_run_details(run_id, request=request)
 
 
 @router.post("/runs/replay")
-def api_replay_fixture(fixture: str = "payment_npe") -> dict[str, Any]:
+def api_replay_fixture(
+    request: Request,
+    fixture: str = "payment_npe",
+    project_id: str | None = Query(default=None),
+) -> dict[str, Any]:
     """Trigger pipeline execution on a saved Sentry fixture and store the triaged incident."""
     import json
     from pathlib import Path
-    from ichnoscope.pipeline import run_pipeline
 
     fixtures_dir = Path(__file__).resolve().parents[1] / "fixtures"
     mapping = {
@@ -584,9 +592,26 @@ def api_replay_fixture(fixture: str = "payment_npe") -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Fixture '{filename}' not found at {fixtures_dir}")
 
     payload = json.loads(file_path.read_text(encoding="utf-8"))
+
+    if not project_id:
+        fixture_project_map = {
+            "payment_npe": "checkout-service",
+            "bug1_keyerror_payment.json": "checkout-service",
+            "auth_jwt": "myshop-backend",
+            "bug2_attributeerror_cart.json": "myshop-backend",
+            "db_leak": "inventory-service",
+            "edge_library_frame_last.json": "inventory-service",
+        }
+        project_id = fixture_project_map.get(fixture) or fixture_project_map.get(filename) or payload.get("project_id") or "checkout-service"
+
     settings = get_settings()
-    run_id, _state, _auto = ingest_incident(payload=payload, settings=settings, apply_policy=True)
-    return api_get_run(run_id)
+    run_id, _state, _auto = ingest_incident(
+        payload=payload,
+        settings=settings,
+        project_id=project_id,
+        apply_policy=True,
+    )
+    return get_run_details(run_id, request=request)
 
 
 class GitHubConnectRequest(BaseModel):

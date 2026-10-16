@@ -89,6 +89,7 @@ def add_team_member(
     role: str = "viewer",
     invited_by: Optional[str] = None,
     db_path: Optional[Path | str] = None,
+    workspace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Add or update a user's membership in a project team."""
     init_db(db_path)
@@ -112,12 +113,13 @@ def add_team_member(
             )
             member_id = existing[0]
         else:
+            ws_id = workspace_id or f"ws_{user_id}" if user_id else "ws_default"
             conn.execute(
                 """
-                INSERT INTO team_members (id, project_id, user_id, role, invited_by, created_at)
-                VALUES (?, ?, ?, ?, ?, ?);
+                INSERT INTO team_members (id, workspace_id, project_id, user_id, role, invited_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
                 """,
-                (member_id, project_id, user_id, role_normalized, invited_by, now),
+                (member_id, ws_id, project_id, user_id, role_normalized, invited_by, now),
             )
 
     log_team_action(

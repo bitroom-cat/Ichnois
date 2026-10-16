@@ -15,6 +15,59 @@ from ichnoscope.db import get_db, init_db
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_PROJECT_ID = "proj_default"
+DEFAULT_PROJECT_NAME = "Default Application"
+
+DEFAULT_MICROSERVICES = [
+    {
+        "project_id": "proj_default",
+        "name": "Default Application",
+        "public_key": "sentry_public_key",
+        "secret_key": "sk_live_default_admin_secret_key_001",
+        "rate_limit_min": 120,
+        "description": "Default production application",
+    },
+    {
+        "project_id": "checkout-service",
+        "name": "Checkout Microservice",
+        "public_key": "pk_live_checkout001",
+        "secret_key": "sk_live_checkout_secret_001",
+        "rate_limit_min": 120,
+        "description": "Payment & Order Checkout Engine",
+    },
+    {
+        "project_id": "auth-service",
+        "name": "Authentication Service",
+        "public_key": "pk_live_auth0000001",
+        "secret_key": "sk_live_auth_secret_0000001",
+        "rate_limit_min": 120,
+        "description": "User Identity & Session Management",
+    },
+    {
+        "project_id": "inventory-service",
+        "name": "Inventory & Catalog Service",
+        "public_key": "pk_live_inventory01",
+        "secret_key": "sk_live_inventory_secret_01",
+        "rate_limit_min": 120,
+        "description": "Stock Levels & Product Catalog",
+    },
+    {
+        "project_id": "edge-gateway",
+        "name": "Edge Ingestion Gateway",
+        "public_key": "pk_live_edge0000001",
+        "secret_key": "sk_live_edge_secret_0000001",
+        "rate_limit_min": 240,
+        "description": "Edge Telemetry Ingestion Proxy",
+    },
+    {
+        "project_id": "myshop-backend",
+        "name": "MyShop E-Commerce Backend",
+        "public_key": "pk_live_myshop00001",
+        "secret_key": "sk_live_myshop_secret_00001",
+        "rate_limit_min": 120,
+        "description": "Core MyShop Retail API & Services",
+    },
+]
 
 class ProjectRecord(BaseModel):
     """Data transfer object representing a registered project and telemetry keys."""
@@ -401,35 +454,37 @@ _DEFAULT_PROJECTS_ENSURED: bool = False
 
 
 def ensure_default_project(db_path: Path | str | None = None) -> None:
-    """Ensure default projects and microservices exist if the database has 0 projects."""
+    """Ensure default projects/microservices exist in the database."""
     global _DEFAULT_PROJECTS_ENSURED
     if _DEFAULT_PROJECTS_ENSURED and db_path is None:
         return
     init_db(db_path)
+    now = time.time()
     with get_db(db_path) as conn:
-        cursor = conn.execute("SELECT count(*) FROM project_keys;")
-        if cursor.fetchone()[0] == 0:
-            now = time.time()
-            seeds = [
-                ("proj_default", "Default Application", "sentry_public_key", "sk_live_default_admin_secret_key_001", "Default production application"),
-                ("checkout-service", "Checkout Service", "pk_live_checkout_001", "sk_live_checkout_001", "Checkout Microservice"),
-                ("auth-service", "Auth & Identity Service", "pk_live_auth_001", "sk_live_auth_001", "Auth Microservice"),
-                ("inventory-service", "Inventory Service", "pk_live_inventory_001", "sk_live_inventory_001", "Inventory Microservice"),
-                ("edge-gateway", "Edge Gateway Service", "pk_live_edge_001", "sk_live_edge_001", "Edge Ingest Gateway"),
-            ]
-            for p_id, p_name, pub_k, sec_k, desc in seeds:
+        for svc in DEFAULT_MICROSERVICES:
+            cursor = conn.execute("SELECT count(*) FROM project_keys WHERE project_id = ?;", (svc["project_id"],))
+            if cursor.fetchone()[0] == 0:
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO project_keys (
+                    INSERT INTO project_keys (
                         project_id, name, public_key, secret_key,
                         rate_limit_min, environment, description,
                         is_active, created_at, updated_at, owner_id
                     )
-                    VALUES (?, ?, ?, ?, 120, 'production', ?, 1, ?, ?, NULL);
+                    VALUES (?, ?, ?, ?, ?, 'production', ?, 1, ?, ?, NULL);
                     """,
-                    (p_id, p_name, pub_k, sec_k, desc, now, now),
+                    (
+                        svc["project_id"],
+                        svc["name"],
+                        svc["public_key"],
+                        svc["secret_key"],
+                        svc["rate_limit_min"],
+                        svc["description"],
+                        now,
+                        now,
+                    ),
                 )
-            logger.info("Initialized default application projects and microservices")
+                logger.info("Initialized default microservice %s (%s)", svc["project_id"], svc["name"])
     _DEFAULT_PROJECTS_ENSURED = True
 
 

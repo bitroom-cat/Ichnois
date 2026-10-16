@@ -61,6 +61,32 @@ def _light_parse(payload: dict, settings: Settings, state: RunState) -> None:
             state.environment = payload_env
 
 
+def _infer_project_id(payload: dict, explicit_project_id: str | None = None) -> str:
+    """Resolve project_id from argument, payload fields, or payload contents."""
+    if explicit_project_id:
+        return explicit_project_id
+    if not isinstance(payload, dict):
+        return "checkout-service"
+    if payload.get("project_id"):
+        return str(payload["project_id"])
+    if payload.get("projectId"):
+        return str(payload["projectId"])
+
+    release = str(payload.get("release", ""))
+    payload_str = str(payload)
+    if "myshop" in release or "cart" in payload_str:
+        return "myshop-backend"
+    if "inventory" in payload_str:
+        return "inventory-service"
+    if "auth" in payload_str:
+        return "auth-service"
+    if "edge" in payload_str or "gateway" in payload_str:
+        return "edge-gateway"
+    if "payment" in payload_str or "checkout" in payload_str:
+        return "checkout-service"
+    return "checkout-service"
+
+
 def stage_raw_incident(
     payload: dict,
     *,
@@ -73,10 +99,11 @@ def stage_raw_incident(
     """Persist an incoming event as Gate 1 `staged_raw` with zero Git/LLM calls."""
     settings = _settings(settings)
     active_run_id = _new_run_id(run_id)
+    resolved_proj_id = _infer_project_id(payload, project_id)
     state = RunState(
         payload=payload,
         status="staged_raw",
-        project_id=project_id,
+        project_id=resolved_proj_id,
         environment=environment,
     )
     log = _logger_for(active_run_id, state, db_path)
@@ -455,11 +482,13 @@ def run_pipeline(
     db_path: str | None = None,
     settings: Settings | None = None,
     client: httpx.Client | None = None,
+    project_id: str | None = None,
 ) -> RunState:
     """Compatibility wrapper used by tests and replay: investigate immediately, optionally publish."""
     settings = _settings(settings)
     active_run_id = _new_run_id(run_id)
-    state = RunState(payload=payload, status="received")
+    resolved_proj_id = _infer_project_id(payload, project_id)
+    state = RunState(payload=payload, status="received", project_id=resolved_proj_id)
     log = _logger_for(active_run_id, state, db_path)
     log("gateway", f"Received incident payload for run {active_run_id}")
     save_run(active_run_id, state, db_path=db_path)

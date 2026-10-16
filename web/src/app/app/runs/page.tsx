@@ -71,7 +71,8 @@ export default function RunsListPage() {
   const triggerReplay = async (fixture: 'payment_npe' | 'auth_jwt' | 'db_leak') => {
     setReplaying(true);
     try {
-      const newRun = await api.replaySavedFixture(fixture);
+      const projId = selectedProjectId !== 'all' ? selectedProjectId : undefined;
+      const newRun = await api.replaySavedFixture(fixture, projId);
       // If user selected manual Gate 1 staging simulation, drop it into staged_raw
       if (replayMode === 'gate1_manual') {
         const stagedRun = {
