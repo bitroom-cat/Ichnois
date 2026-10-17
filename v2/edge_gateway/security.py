@@ -102,11 +102,30 @@ def inspect_payload(body_bytes: bytes, max_bytes: int = 51200, max_depth: int = 
     except UnicodeDecodeError as exc:
         raise SecurityPerimeterViolation("Malformed character encoding (UTF-8 required).", status_code=400) from exc
 
-    # 3. JSON parsing
+    # 3. JSON parsing (supports single JSON object or Sentry newline-delimited envelopes)
     try:
         parsed_json = json.loads(raw_text)
     except json.JSONDecodeError as exc:
-        raise SecurityPerimeterViolation(f"Invalid JSON syntax: {exc.msg}", status_code=400) from exc
+        parsed_json = None
+        envelope_header = {}
+        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        for line in lines:
+            try:
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    if not envelope_header and "event_id" in item and "exception" not in item:
+                        envelope_header = item
+                    if "exception" in item or "threads" in item or ("level" in item and "message" in item):
+                        parsed_json = item
+                        break
+            except Exception:
+                continue
+
+        if parsed_json is not None:
+            if "event_id" not in parsed_json and "event_id" in envelope_header:
+                parsed_json["event_id"] = envelope_header["event_id"]
+        else:
+            raise SecurityPerimeterViolation(f"Invalid JSON syntax: {exc.msg}", status_code=400) from exc
 
     # 4. Nesting depth check
     validate_json_depth(parsed_json, max_depth)

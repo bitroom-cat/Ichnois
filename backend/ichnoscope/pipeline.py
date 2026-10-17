@@ -176,6 +176,8 @@ def execute_investigation(
                     count=bump_count,
                     settings=settings,
                     client=http_client,
+                    project_id=state.project_id,
+                    db_path=db_path,
                 )
             state.status = "suppressed"
             save_run(run_id, state, db_path=db_path)
@@ -307,22 +309,31 @@ def publish_draft_issue(
     repo_override = None
     channel_override = None
     webhook_override = None
+    token_override = None
     if state.project_id:
         try:
             from ichnoscope.projects import get_project
+            from ichnoscope.github_app import get_github_app_service
 
             proj = get_project(state.project_id, db_path=db_path)
             if proj:
-                if proj.github_repo or proj.github_repo_override:
+                if proj.github_installation_id and proj.github_repo:
+                    repo_override = proj.github_repo
+                    try:
+                        token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+                    except Exception as token_err:
+                        log("dispatch", f"Failed to get GitHub App installation token: {token_err}", level="WARN")
+                elif proj.github_repo or proj.github_repo_override:
                     repo_override = proj.github_repo or proj.github_repo_override
+
                 if proj.slack_channel_override:
                     channel_override = proj.slack_channel_override
                 if proj.webhook_url:
                     webhook_override = proj.webhook_url
                 if proj.fallback_assignee and not assignee:
                     assignee = proj.fallback_assignee
-        except Exception:
-            pass
+        except Exception as exc:
+            log("dispatch", f"Error resolving project settings: {exc}", level="WARN")
 
     try:
         pub_res = publish_issue(
@@ -338,6 +349,9 @@ def publish_draft_issue(
             body_override=body,
             assignee_override=assignee,
             repo_override=repo_override,
+            token_override=token_override,
+            project_id=state.project_id,
+            db_path=db_path,
         )
         state.issue_url = pub_res.issue_url
         state.status = "published"

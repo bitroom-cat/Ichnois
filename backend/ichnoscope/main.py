@@ -280,16 +280,40 @@ async def sentry_webhook(
 
 @app.post("/api/{project_id}/store/")
 @app.post("/api/{project_id}/envelope/")
+@app.post("/api/api/{project_id}/store/")
+@app.post("/api/api/{project_id}/envelope/")
 async def project_scoped_sentry_ingress(
     project_id: str,
     request: Request,
 ) -> dict[str, Any]:
     """Ingest Sentry error telemetry scoped to a specific microservice project."""
     body = await request.body()
-    try:
-        payload = json.loads(body.decode("utf-8")) if body else {}
-    except Exception:
-        payload = {"raw": body.decode("utf-8", errors="replace")}
+    payload = {}
+    if body:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            # Check for Sentry newline-delimited envelope
+            raw_text = body.decode("utf-8", errors="replace")
+            envelope_header = {}
+            for line in raw_text.splitlines():
+                clean_line = line.strip()
+                if not clean_line:
+                    continue
+                try:
+                    item = json.loads(clean_line)
+                    if isinstance(item, dict):
+                        if not envelope_header and "event_id" in item and "exception" not in item:
+                            envelope_header = item
+                        if "exception" in item or "threads" in item or ("level" in item and "message" in item):
+                            payload = item
+                            break
+                except Exception:
+                    continue
+            if payload and "event_id" not in payload and "event_id" in envelope_header:
+                payload["event_id"] = envelope_header["event_id"]
+            if not payload:
+                payload = {"raw": raw_text}
 
     settings = get_settings()
     run_id, state, auto_promoted = ingest_incident(

@@ -199,10 +199,13 @@ def find_culprit(
             proj = get_project(project_id)
             if proj:
                 if proj.github_installation_id and proj.github_repo:
-                    repo_override = proj.github_repo
-                    token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+                    if not repo_override:
+                        repo_override = proj.github_repo
+                    if not token_override:
+                        token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
                 elif proj.github_repo or proj.github_repo_override:
-                    repo_override = proj.github_repo or proj.github_repo_override
+                    if not repo_override:
+                        repo_override = proj.github_repo or proj.github_repo_override
                 if proj.window_hours:
                     window_hours = proj.window_hours
         except Exception as exc:

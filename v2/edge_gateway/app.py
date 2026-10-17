@@ -265,6 +265,8 @@ async def invalidate_key_cache(
 # Layer 8: Telemetry Ingestion Endpoints (Sentry / GlitchTip / Native)
 @app.post("/api/{project_id}/envelope/")
 @app.post("/api/{project_id}/store/")
+@app.post("/api/api/{project_id}/envelope/")
+@app.post("/api/api/{project_id}/store/")
 @app.post("/api/v1/telemetry/ingest")
 async def ingest_telemetry(
     request: Request,
