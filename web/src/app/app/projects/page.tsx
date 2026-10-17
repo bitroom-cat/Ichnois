@@ -63,9 +63,21 @@ export default function ProjectsPage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successBanner, setSuccessBanner] = useState<string | null>(null);
 
-  // Master-Detail Expanded Card & Interactive Index Sync State
-  const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
-  const cardRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
+  // Fleet Services Animation, Expansion, & Minimize State
+  const [openMap, setOpenMap] = useState<Record<string, boolean>>({});
+  const [minimizedMap, setMinimizedMap] = useState<Record<string, boolean>>({});
+  const [flashingId, setFlashingId] = useState<string | null>(null);
+  const [pulsingIdxId, setPulsingIdxId] = useState<string | null>(null);
+  const [newlyEnteredId, setNewlyEnteredId] = useState<string | null>(null);
+  const [ghostState, setGhostState] = useState<{
+    visible: boolean;
+    name: string;
+    env: string;
+  } | null>(null);
+
+  const slotRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const idxRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   // 1-Click Multi-Repo Selection Modal State (when OAuth returns > 1 repo or manual switch)
   const [repoSelectorState, setRepoSelectorState] = useState<{
@@ -120,6 +132,15 @@ export default function ProjectsPage() {
     try {
       const data = await api.getProjects();
       setProjects(data);
+      // Auto open first project if none open
+      if (data.length > 0) {
+        setOpenMap((prev) => {
+          if (Object.keys(prev).length === 0) {
+            return { [data[0].project_id]: true };
+          }
+          return prev;
+        });
+      }
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to fetch projects');
     } finally {
@@ -131,25 +152,8 @@ export default function ProjectsPage() {
     loadProjects();
   }, []);
 
-  // Initialize expanded card with selected or first project
-  useEffect(() => {
-    if (projects.length > 0 && !expandedProjectId) {
-      const selected = getSelectedProjectId();
-      const match = projects.find((p) => p.project_id === selected);
-      setExpandedProjectId(match ? match.project_id : projects[0].project_id);
-    }
-  }, [projects, expandedProjectId]);
-
-  const handleSelectAndScrollTo = (projectId: string) => {
-    setExpandedProjectId(projectId);
-    const target = cardRefs.current[projectId];
-    if (target) {
-      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  };
-
   const toggleCard = (projectId: string) => {
-    setExpandedProjectId((prev) => (prev === projectId ? null : projectId));
+    setOpenMap((prev) => ({ ...prev, [projectId]: !prev[projectId] }));
   };
 
   // Handle 1-Click GitHub App OAuth Redirect Back
@@ -338,37 +342,118 @@ export default function ProjectsPage() {
     }, 2000);
   };
 
+  // Web Animations API: Dynamic anchor calculation for Genie minimize & spring restore
+  const anchorOrigin = (cardEl: HTMLElement, idxEl: HTMLElement) => {
+    const c = cardEl.getBoundingClientRect();
+    const s = idxEl.getBoundingClientRect();
+    const ox = ((s.left + s.width / 2 - c.left) / c.width) * 100;
+    const oy = ((s.top + s.height / 2 - c.top) / c.height) * 100;
+    return `${ox}% ${oy}%`;
+  };
+
+  const genieFrames = (origin: string): Keyframe[] => [
+    { transform: 'translate3d(0,0,0) scale(1)', clipPath: 'polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%)', opacity: 1, transformOrigin: origin },
+    { transform: 'translate3d(0, -6px, 0) scale(0.94, 0.9)', clipPath: 'polygon(3% 0%, 97% 0%, 82% 100%, 18% 100%)', opacity: 0.95, offset: 0.35, transformOrigin: origin },
+    { transform: 'translate3d(0, -18px, 0) scale(0.5, 0.3)', clipPath: 'polygon(12% 0%, 88% 0%, 58% 100%, 42% 100%)', opacity: 0.6, offset: 0.7, transformOrigin: origin },
+    { transform: 'translate3d(0, -28px, 0) scale(0.04, 0.04)', clipPath: 'polygon(45% 0%, 55% 0%, 51% 100%, 49% 100%)', opacity: 0, transformOrigin: origin },
+  ];
+
+  const handleMinimize = (projectId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    const card = cardRefs.current[projectId];
+    const idx = idxRefs.current[projectId];
+    if (card && idx) {
+      const origin = anchorOrigin(card, idx);
+      const anim = card.animate(genieFrames(origin), {
+        duration: 720,
+        easing: 'cubic-bezier(.55, 0, .75, .2)',
+      });
+      anim.onfinish = () => {
+        setMinimizedMap((prev) => ({ ...prev, [projectId]: true }));
+        setPulsingIdxId(projectId);
+        setTimeout(() => setPulsingIdxId(null), 1400);
+      };
+    } else {
+      setMinimizedMap((prev) => ({ ...prev, [projectId]: true }));
+      setPulsingIdxId(projectId);
+      setTimeout(() => setPulsingIdxId(null), 1400);
+    }
+  };
+
+  const handleRestore = (projectId: string) => {
+    if (minimizedMap[projectId]) {
+      setMinimizedMap((prev) => ({ ...prev, [projectId]: false }));
+      requestAnimationFrame(() => {
+        const card = cardRefs.current[projectId];
+        const idx = idxRefs.current[projectId];
+        if (card && idx) {
+          const origin = anchorOrigin(card, idx);
+          const anim = card.animate(genieFrames(origin).slice().reverse(), {
+            duration: 900,
+            easing: 'cubic-bezier(.25, 1, .5, 1)',
+          });
+          anim.onfinish = () => {
+            setFlashingId(projectId);
+            setTimeout(() => setFlashingId(null), 1200);
+          };
+        } else {
+          setFlashingId(projectId);
+          setTimeout(() => setFlashingId(null), 1200);
+        }
+      });
+    } else {
+      setOpenMap((prev) => ({ ...prev, [projectId]: true }));
+      const slot = slotRefs.current[projectId];
+      if (slot) {
+        slot.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+      setFlashingId(projectId);
+      setTimeout(() => setFlashingId(null), 1200);
+    }
+  };
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formName.trim()) return;
 
-    setIsSubmitting(true);
-    setErrorMsg(null);
-    try {
-      const payload: ProjectCreateInput = {
-        name: formName.trim(),
-        environment: formEnv,
-        rate_limit_min: Number(formRateLimit) || 120,
-        github_repo_override: formGithubRepo.trim() || undefined,
-        slack_channel_override: formSlackChannel.trim() || undefined,
-        fallback_assignee: formFallbackAssignee.trim() || undefined,
-        path_prefix_strip: formPathPrefix.trim() || 'src/',
-      };
+    const name = formName.trim();
+    const env = formEnv;
+    const payload: ProjectCreateInput = {
+      name,
+      environment: env,
+      rate_limit_min: Number(formRateLimit) || 120,
+      github_repo_override: formGithubRepo.trim() || undefined,
+      slack_channel_override: formSlackChannel.trim() || undefined,
+      fallback_assignee: formFallbackAssignee.trim() || undefined,
+      path_prefix_strip: formPathPrefix.trim() || 'src/',
+    };
 
+    setCreateModalOpen(false);
+    setGhostState({ visible: true, name, env });
+    setErrorMsg(null);
+    setFormName('');
+    setFormGithubRepo('');
+    setFormSlackChannel('');
+    setFormFallbackAssignee('');
+    setFormPathPrefix('src/');
+    setFormRateLimit(120);
+
+    const startTime = Date.now();
+    try {
       const newProj = await api.createProject(payload);
-      setCreateModalOpen(false);
-      setFormName('');
-      setFormGithubRepo('');
-      setFormSlackChannel('');
-      setFormFallbackAssignee('');
-      setFormPathPrefix('src/');
-      setFormRateLimit(120);
-      await loadProjects();
-      setSdkModalProject(newProj);
+      const elapsed = Date.now() - startTime;
+      const remainingTime = Math.max(0, 1680 - elapsed);
+      setTimeout(async () => {
+        setGhostState(null);
+        await loadProjects();
+        setNewlyEnteredId(newProj.project_id);
+        setOpenMap((prev) => ({ ...prev, [newProj.project_id]: true }));
+        setTimeout(() => setNewlyEnteredId(null), 800);
+        setSdkModalProject(newProj);
+      }, remainingTime);
     } catch (err: any) {
+      setGhostState(null);
       setErrorMsg(err.message || 'Failed to create project');
-    } finally {
-      setIsSubmitting(false);
     }
   };
 
@@ -425,26 +510,53 @@ export default function ProjectsPage() {
     return `https://${proj.public_key}@${host}/${proj.project_id}`;
   };
 
-  const formatDate = (epochSec?: number) => {
+  const getEnvConfig = (env?: string) => {
+    const e = (env || 'production').toLowerCase();
+    if (e === 'production' || e === 'prod') {
+      return {
+        label: 'PROD',
+        dotClass: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]',
+        pillClass: 'text-[#34d399] bg-[#34d399]/10 border-[#34d399]/25',
+      };
+    }
+    if (e === 'staging' || e === 'stage') {
+      return {
+        label: 'STAGE',
+        dotClass: 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]',
+        pillClass: 'text-[#fbbf24] bg-[#fbbf24]/10 border-[#fbbf24]/25',
+      };
+    }
+    return {
+      label: 'DEV',
+      dotClass: 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.6)]',
+      pillClass: 'text-[#22d3ee] bg-[#22d3ee]/10 border-[#22d3ee]/25',
+    };
+  };
+
+  const formatRelativeTime = (epochSec?: number) => {
     if (!epochSec) return 'Recently';
-    const date = new Date(epochSec * 1000);
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const diffSec = Math.floor(Date.now() / 1000 - epochSec);
+    if (diffSec < 60) return 'Just now';
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+    if (diffSec < 604800) return `${Math.floor(diffSec / 86400)}d ago`;
+    return new Date(epochSec * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
 
   return (
-    <div className="flex-1 overflow-y-auto p-4 sm:p-6 w-full max-w-[1280px] mx-auto space-y-6">
+    <div className="flex-1 overflow-y-auto p-4 sm:p-6 w-full max-w-[1360px] mx-auto space-y-6">
       {/* 1. Top Header Frame */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border-subtle pb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#262930] pb-4">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl font-bold tracking-tight text-text-primary">
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-xl font-bold tracking-tight text-[#e7e9ee]">
               Microservices &amp; Telemetry Endpoints
             </h1>
-            <span className="px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
+            <span className="px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-500/10 text-purple-400 border border-purple-500/20 shadow-xs">
               FLEET SERVICES
             </span>
           </div>
-          <p className="text-xs text-text-secondary mt-1">
+          <p className="text-xs text-[#8b90a0] mt-1">
             Manage microservices, configure 1-click GitHub triage access, inspect DSNs, and route incident notifications.
           </p>
         </div>
@@ -452,570 +564,487 @@ export default function ProjectsPage() {
         <button
           type="button"
           onClick={() => setCreateModalOpen(true)}
-          className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-purple-600 hover:bg-purple-700 text-white shadow-xs transition-colors shrink-0"
+          className="px-4 py-2 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-medium text-xs flex items-center gap-2 shadow-lg shadow-purple-900/30 transition-all self-start sm:self-auto shrink-0"
         >
-          <Plus className="w-3.5 h-3.5" />
-          <span>+ New Microservice</span>
+          <Plus className="w-4 h-4" />
+          Register Microservice
         </button>
       </div>
 
-      {/* Success Notification Banner */}
+      {/* Global Notifications */}
       {successBanner && (
-        <div className="p-3.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-xs flex items-center justify-between animate-in fade-in">
-          <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 shrink-0" />
-            <span className="font-medium">{successBanner}</span>
-          </div>
-          <button onClick={() => setSuccessBanner(null)} className="text-emerald-500 hover:text-emerald-400">
+        <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs flex items-center justify-between animate-in fade-in">
+          <span>{successBanner}</span>
+          <button type="button" onClick={() => setSuccessBanner(null)} className="text-emerald-400/80 hover:text-emerald-400">
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
-      {/* Error Message Banner */}
       {errorMsg && (
-        <div className="p-3.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-600 dark:text-red-400 text-xs flex items-center justify-between animate-in fade-in">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{errorMsg}</span>
-          </div>
-          <button onClick={() => setErrorMsg(null)} className="text-red-400 hover:text-red-300">
+        <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs flex items-center justify-between animate-in fade-in">
+          <span>{errorMsg}</span>
+          <button type="button" onClick={() => setErrorMsg(null)} className="text-red-400/80 hover:text-red-400">
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
-      {/* Microservices Workspace Content */}
-      {loading ? (
-        <div className="py-16 flex flex-col items-center justify-center text-text-muted gap-2 text-xs">
-          <Activity className="w-6 h-6 animate-spin text-purple-500" />
-          <span>Loading microservice fleet...</span>
+      {/* Loading Skeleton */}
+      {loading && (
+        <div className="space-y-3">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-20 rounded-xl bg-[#13141a] border border-[#262930] animate-pulse" />
+          ))}
         </div>
-      ) : projects.length === 0 ? (
-        <div className="border border-border-subtle rounded-xl p-10 text-center bg-surface">
-          <FolderKanban className="w-10 h-10 text-text-muted mx-auto mb-3" />
-          <h3 className="text-sm font-semibold text-text-primary">No Microservices Configured</h3>
-          <p className="text-xs text-text-secondary mt-1 max-w-sm mx-auto">
-            Create your first microservice to generate an isolated Sentry DSN and link code repositories for automated git blame.
-          </p>
-          <button
-            onClick={() => setCreateModalOpen(true)}
-            className="mt-4 px-4 py-2 text-xs font-semibold bg-purple-600 text-white rounded-md hover:bg-purple-700 shadow-xs"
-          >
-            Create First Service
-          </button>
-        </div>
-      ) : (
-        /* 2. Main Canvas (70% / 30% Split Layout) */
+      )}
+
+      {/* 2. Responsive 70% / 30% Master-Detail Layout */}
+      {!loading && (
         <div className="grid grid-cols-1 lg:grid-cols-10 gap-6 items-start">
-          {/* Left Side (70% Width) - Interactive Service Workspace */}
-          <div className="lg:col-span-7 space-y-4">
-            {projects.map((proj) => {
-              const sentryDsn = getSentryDsn(proj);
-              const isDefault = proj.project_id === 'proj_default';
-              const isBusy = actionLoadingId === proj.project_id;
-              const boundRepo = proj.github_repo || proj.github_repo_override;
-              const isGithubConnected = Boolean(boundRepo);
-              const isExpanded = expandedProjectId === proj.project_id;
+          {/* Workspace Column (70%): order-2 lg:order-1 */}
+          <div className="lg:col-span-7 space-y-4 order-2 lg:order-1">
+            {/* App-opening 3-hop bouncing ghost placeholder */}
+            {ghostState?.visible && (
+              <div className="fleet-ghost rounded-xl border border-purple-500/40 bg-[#13141a]/95 backdrop-blur-md p-4 shadow-xl flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-purple-500/20 border border-purple-500/30 flex items-center justify-center animate-spin">
+                    <Sparkles className="w-4 h-4 text-purple-400" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-sm text-[#e7e9ee]">{ghostState.name}</span>
+                      <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 uppercase">
+                        PROVISIONING
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#8b90a0] mt-0.5">
+                      Binding telemetry ingestion pipeline &amp; keys...
+                    </p>
+                  </div>
+                </div>
+                <div className="text-xs font-mono text-purple-400 animate-pulse font-medium">
+                  Deploying...
+                </div>
+              </div>
+            )}
+
+            {/* Zero State */}
+            {projects.length === 0 && !ghostState?.visible && (
+              <div className="rounded-xl border border-dashed border-[#262930] bg-[#13141a]/50 p-12 text-center space-y-3">
+                <Server className="w-10 h-10 text-[#8b90a0] mx-auto opacity-50" />
+                <h3 className="font-semibold text-sm text-[#e7e9ee]">No microservices registered</h3>
+                <p className="text-xs text-[#8b90a0] max-w-sm mx-auto">
+                  Register your first service to generate telemetry ingestion DSNs and connect GitHub repositories for 1-click triage.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setCreateModalOpen(true)}
+                  className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-medium text-xs inline-flex items-center gap-2 shadow-xs transition-colors"
+                >
+                  <Plus className="w-4 h-4" />
+                  Register First Microservice
+                </button>
+              </div>
+            )}
+
+            {/* Microservice Cards List */}
+            {projects.map((project) => {
+              const isMinimized = !!minimizedMap[project.project_id];
+              const isOpen = !!openMap[project.project_id];
+              const isFlashing = flashingId === project.project_id;
+              const isNewlyEntered = newlyEnteredId === project.project_id;
+              const envCfg = getEnvConfig(project.environment);
 
               return (
-                <motion.div
-                  key={proj.project_id}
-                  ref={(el) => {
-                    cardRefs.current[proj.project_id] = el;
+                <div
+                  key={project.project_id}
+                  ref={(el) => { slotRefs.current[project.project_id] = el; }}
+                  className="fleet-slot"
+                  style={{
+                    gridTemplateRows: isMinimized ? '0fr' : '1fr',
+                    opacity: isMinimized ? 0 : 1,
                   }}
-                  layout
-                  transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-                  className={`border rounded-xl bg-surface transition-colors shadow-xs overflow-hidden flex flex-col ${
-                    isExpanded
-                      ? 'border-purple-500/50 dark:border-purple-500/40 shadow-md ring-1 ring-purple-500/20'
-                      : 'border-border-subtle hover:border-border-strong'
-                  }`}
                 >
-                  {/* Collapsed State Bar / Accordion Header */}
-                  <div
-                    onClick={() => toggleCard(proj.project_id)}
-                    className="p-4 sm:p-5 cursor-pointer bg-surface hover:bg-surface-raised/40 transition-colors flex items-center justify-between gap-3 select-none"
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
+                  <div className="min-h-0 overflow-hidden">
+                    <div
+                      ref={(el) => { cardRefs.current[project.project_id] = el; }}
+                      className={`fleet-card ${isOpen ? 'open' : ''} ${isFlashing ? 'flash' : ''} ${isNewlyEntered ? 'fleet-enter' : ''}`}
+                    >
+                      {/* Summary Row */}
                       <div
-                        className={`w-9 h-9 rounded-lg flex items-center justify-center font-bold text-sm shrink-0 border shadow-xs transition-colors ${
-                          isExpanded
-                            ? 'bg-purple-600 text-white border-purple-500'
-                            : 'bg-purple-600/10 text-purple-600 dark:text-purple-400 border-purple-500/20'
-                        }`}
+                        onClick={() => toggleCard(project.project_id)}
+                        className="p-4 flex flex-wrap items-center justify-between gap-3 cursor-pointer select-none"
                       >
-                        {proj.name.charAt(0).toUpperCase()}
-                      </div>
+                        <div className="flex items-center gap-3 min-w-0">
+                          {/* Status Dot */}
+                          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${envCfg.dotClass}`} />
 
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-bold text-sm sm:text-base text-text-primary tracking-tight truncate">
-                            {proj.name}
+                          {/* Env Pill */}
+                          <span className={`px-2 py-0.5 text-[10px] font-bold font-mono tracking-wider rounded-md border ${envCfg.pillClass}`}>
+                            {envCfg.label}
                           </span>
-                          {isDefault && (
-                            <span className="px-1.5 py-0.5 text-[9px] font-semibold rounded bg-surface-sunken text-text-muted border border-border-subtle uppercase tracking-wider">
-                              Default
+
+                          {/* Name & ID */}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-sm text-[#e7e9ee] hover:text-white truncate">
+                                {project.name}
+                              </span>
+                              {project.project_id === 'proj_default' && (
+                                <span className="px-1.5 py-0.2 rounded text-[9px] font-semibold uppercase tracking-wider bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                                  Default
+                                </span>
+                              )}
+                            </div>
+                            <span className="font-mono text-[11px] text-[#8b90a0] block truncate">
+                              {project.project_id}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Inline Chips & Controls */}
+                        <div className="flex items-center gap-2 ml-auto shrink-0">
+                          {/* GitHub Repo chip */}
+                          {project.github_repo || project.github_repo_override ? (
+                            <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded bg-[#171921] text-[#e7e9ee] border border-[#262930]">
+                              <Github className="w-3 h-3 text-purple-400" />
+                              {(project.github_repo || project.github_repo_override || '').split('/')[1] || project.github_repo}
+                            </span>
+                          ) : (
+                            <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded bg-[#171921] text-[#8b90a0] border border-[#262930]/60">
+                              <Github className="w-3 h-3 text-[#8b90a0]" />
+                              No repo
                             </span>
                           )}
-                          <span className="px-2 py-0.5 text-[10px] font-semibold rounded-full uppercase tracking-wider bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                            Operational
-                          </span>
-                          <span className="px-2 py-0.5 text-[10px] font-semibold rounded-full uppercase tracking-wider bg-surface-sunken text-text-secondary border border-border-subtle">
-                            {proj.environment || 'PRODUCTION'}
-                          </span>
-                        </div>
 
-                        <div className="text-[11px] text-text-muted font-mono mt-0.5 flex items-center gap-2 flex-wrap">
-                          <span>ID: {proj.project_id}</span>
-                          <span>•</span>
-                          <span>Created: {formatDate(proj.created_at)}</span>
-                          {boundRepo ? (
-                            <>
-                              <span>•</span>
-                              <span className="text-purple-600 dark:text-purple-400 flex items-center gap-1 font-semibold truncate max-w-[200px]">
-                                <Github className="w-3 h-3 shrink-0" />
-                                <span className="truncate">{boundRepo}</span>
-                              </span>
-                            </>
-                          ) : (
-                            <>
-                              <span>•</span>
-                              <span className="text-amber-600 dark:text-amber-400 font-medium">No Repo Linked</span>
-                            </>
-                          )}
+                          {/* Rate limit chip */}
+                          <span className="hidden md:inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded bg-[#171921] text-[#8b90a0] border border-[#262930]/60">
+                            <Activity className="w-3 h-3 text-blue-400" />
+                            {project.rate_limit_min || 120}/m
+                          </span>
+
+                          {/* Copy DSN button */}
+                          <button
+                            type="button"
+                            title="Copy Sentry Ingestion DSN"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCopy(getSentryDsn(project), `dsn_${project.project_id}`);
+                            }}
+                            className="p-1.5 rounded-md bg-[#171921] hover:bg-[#262930] text-[#8b90a0] hover:text-[#e7e9ee] border border-[#262930] transition-colors"
+                          >
+                            {copiedKey === `dsn_${project.project_id}` ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+
+                          {/* Settings button */}
+                          <button
+                            type="button"
+                            title="Configure Microservice"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenSettingsModal(project);
+                            }}
+                            className="p-1.5 rounded-md bg-[#171921] hover:bg-[#262930] text-[#8b90a0] hover:text-[#e7e9ee] border border-[#262930] transition-colors"
+                          >
+                            <Settings className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Chevron icon with spring rotation */}
+                          <div className="chevron-icon text-[#8b90a0] transition-transform duration-300">
+                            <ChevronDown className="w-4 h-4" />
+                          </div>
+
+                          {/* Genie minimize button */}
+                          <button
+                            type="button"
+                            title="Minimize to Mission Control Index"
+                            onClick={(e) => handleMinimize(project.project_id, e)}
+                            className="p-1.5 rounded-md hover:bg-red-500/20 text-[#8b90a0] hover:text-red-400 transition-colors ml-1"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </div>
-                    </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-[11px] text-text-muted font-medium hidden sm:inline">
-                        {isExpanded ? 'Collapse' : 'Expand'}
-                      </span>
-                      <motion.div
-                        animate={{ rotate: isExpanded ? 180 : 0 }}
-                        transition={{ duration: 0.2 }}
-                        className="w-7 h-7 rounded-md bg-surface-sunken border border-border-subtle flex items-center justify-center text-text-secondary"
-                      >
-                        <ChevronDown className="w-4 h-4" />
-                      </motion.div>
-                    </div>
-                  </div>
-
-                  {/* Expanded State (Inline Accordion with Framer Motion) */}
-                  <AnimatePresence initial={false}>
-                    {isExpanded && (
-                      <motion.div
-                        key={`content-${proj.project_id}`}
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: 'auto' }}
-                        exit={{ opacity: 0, height: 0 }}
-                        transition={{ type: 'spring', stiffness: 300, damping: 25 }}
-                        className="overflow-hidden border-t border-border-subtle/70"
-                      >
-                        {/* 1. Action Buttons Hierarchy */}
-                        <div className="p-4 sm:p-5 bg-surface flex flex-wrap items-center gap-2 border-b border-border-subtle/70">
-                          {/* Primary Action: Dedicated Service Dashboard CTA */}
-                          <button
-                            type="button"
-                            onClick={() => handleOpenDashboard(proj.project_id)}
-                            className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-md bg-purple-600 hover:bg-purple-700 text-white shadow-xs transition-colors shrink-0"
-                          >
-                            <Zap className="w-3.5 h-3.5 text-amber-300" />
-                            <span>Open Service Dashboard</span>
-                            <ArrowUpRight className="w-3.5 h-3.5" />
-                          </button>
-
-                          {/* Secondary Action: View Incidents */}
-                          <button
-                            type="button"
-                            onClick={() => handleFilterRuns(proj.project_id)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-surface-raised hover:bg-hover border border-border-subtle text-text-secondary hover:text-text-primary transition-colors shrink-0"
-                          >
-                            <Activity className="w-3.5 h-3.5 text-purple-500" />
-                            <span>View Incidents</span>
-                          </button>
-
-                          {/* Secondary Action: Service Settings */}
-                          <button
-                            type="button"
-                            onClick={() => handleOpenSettingsModal(proj)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-surface-raised hover:bg-hover border border-border-subtle text-text-secondary hover:text-text-primary transition-colors shrink-0"
-                          >
-                            <Settings className="w-3.5 h-3.5 text-text-muted" />
-                            <span>Service Settings</span>
-                          </button>
-
-                          {/* Destructive Action: Delete Service */}
-                          {!isDefault && (
-                            <button
-                              type="button"
-                              disabled={isBusy}
-                              onClick={() => handleDelete(proj)}
-                              title="Delete Service"
-                              className="ml-auto flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-red-500 hover:text-red-600 hover:bg-red-500/10 rounded-md border border-transparent hover:border-red-500/20 transition-colors"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                              <span className="hidden sm:inline">Delete Service</span>
-                            </button>
-                          )}
-                        </div>
-
-                        {/* 2. Ingestion Endpoints & Credentials Box */}
-                        <div className="p-4 sm:p-5 bg-surface-raised/20 border-b border-border-subtle/70 space-y-2">
-                          <div className="flex items-center justify-between text-[11px] font-semibold text-text-muted uppercase tracking-wider">
-                            <span>Ingestion Endpoints &amp; Credentials</span>
-                          </div>
-
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                            {/* Sentry DSN */}
-                            <div className="p-3 rounded-lg bg-surface border border-border-subtle flex flex-col justify-between gap-2 shadow-2xs">
-                              <div>
-                                <div className="flex items-center justify-between text-[11px] text-text-muted mb-1">
-                                  <span className="font-semibold text-text-secondary flex items-center gap-1">
-                                    <Key className="w-3 h-3 text-purple-500" />
-                                    Sentry-Compatible DSN (SDK Target)
-                                  </span>
-                                </div>
-                                <code className="text-[11px] font-mono text-text-primary block truncate bg-surface-sunken p-1.5 rounded border border-border-subtle/60 select-all">
-                                  {sentryDsn}
-                                </code>
+                      {/* Expanded Detail Body */}
+                      <div className="fleet-body">
+                        <div className="fleet-inner p-4 pt-0 space-y-4 border-t border-[#262930]/60">
+                          {/* Telemetry DSN Banner */}
+                          <div className="mt-3 p-3 rounded-lg bg-[#0d0e12] border border-[#262930] space-y-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <Radio className="w-3.5 h-3.5 text-purple-400" />
+                                <span className="text-xs font-semibold text-[#e7e9ee]">Sentry-Compatible Ingestion DSN</span>
                               </div>
-
-                              <div className="flex items-center gap-2 pt-1 border-t border-border-subtle/40">
+                              <div className="flex items-center gap-2">
                                 <button
                                   type="button"
-                                  onClick={() => handleCopy(sentryDsn, `dsn-${proj.project_id}`)}
-                                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-purple-600 dark:text-purple-400 bg-purple-500/10 hover:bg-purple-500/20 rounded border border-purple-500/20 transition-colors"
+                                  onClick={() => handleRotateKey(project)}
+                                  disabled={actionLoadingId === project.project_id}
+                                  className="text-[11px] text-[#8b90a0] hover:text-amber-400 flex items-center gap-1 transition-colors"
                                 >
-                                  {copiedKey === `dsn-${proj.project_id}` ? (
-                                    <>
-                                      <Check className="w-3 h-3" />
-                                      <span>Copied DSN</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Copy className="w-3 h-3" />
-                                      <span>Copy DSN</span>
-                                    </>
-                                  )}
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => setSdkModalProject(proj)}
-                                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-text-secondary hover:text-text-primary bg-surface-raised hover:bg-hover rounded border border-border-subtle transition-colors"
-                                >
-                                  <Code className="w-3 h-3" />
-                                  <span>Quick SDK Snippets</span>
+                                  <RotateCcw className="w-3 h-3" />
+                                  Rotate Key
                                 </button>
                               </div>
                             </div>
-
-                            {/* Telemetry Public Key */}
-                            <div className="p-3 rounded-lg bg-surface border border-border-subtle flex flex-col justify-between gap-2 shadow-2xs">
-                              <div>
-                                <div className="flex items-center justify-between text-[11px] text-text-muted mb-1">
-                                  <span className="font-semibold text-text-secondary flex items-center gap-1">
-                                    <Shield className="w-3 h-3 text-emerald-500" />
-                                    Telemetry Public Key
-                                  </span>
-                                </div>
-                                <code className="text-[11px] font-mono text-text-primary block truncate bg-surface-sunken p-1.5 rounded border border-border-subtle/60 select-all">
-                                  {proj.public_key}
-                                </code>
-                              </div>
-
-                              <div className="flex items-center gap-2 pt-1 border-t border-border-subtle/40">
-                                <button
-                                  type="button"
-                                  onClick={() => handleCopy(proj.public_key, `pub-${proj.project_id}`)}
-                                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-purple-600 dark:text-purple-400 bg-purple-500/10 hover:bg-purple-500/20 rounded border border-purple-500/20 transition-colors"
-                                >
-                                  {copiedKey === `pub-${proj.project_id}` ? (
-                                    <>
-                                      <Check className="w-3 h-3" />
-                                      <span>Copied Key</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Copy className="w-3 h-3" />
-                                      <span>Copy Key</span>
-                                    </>
-                                  )}
-                                </button>
-
-                                <button
-                                  type="button"
-                                  disabled={isBusy}
-                                  onClick={() => handleRotateKey(proj)}
-                                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 rounded border border-transparent hover:border-amber-500/20 transition-colors ml-auto"
-                                  title="Rotate Telemetry Key"
-                                >
-                                  <RotateCcw className={`w-3 h-3 ${isBusy ? 'animate-spin' : ''}`} />
-                                  <span>Rotate Key</span>
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* 3. Source Codebase & Autonomous Agent Triage */}
-                        <div className="p-4 sm:p-5 bg-surface space-y-3">
-                          <div className="flex items-center justify-between text-[11px] font-semibold text-text-muted uppercase tracking-wider">
-                            <span>Source Codebase &amp; Autonomous Agent Triage</span>
-                          </div>
-
-                          {!isGithubConnected ? (
-                            <div className="p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                              <div className="space-y-1">
-                                <div className="flex items-center gap-2">
-                                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>
-                                  <span className="font-semibold text-xs text-amber-700 dark:text-amber-400 uppercase tracking-wider">
-                                    Repository Not Connected
-                                  </span>
-                                </div>
-                                <p className="text-xs text-text-secondary leading-relaxed max-w-xl">
-                                  Required for automated GraphQL blame, diff inspection, commit correlation, and GitHub issue publishing.
-                                </p>
-                              </div>
-
+                            <div className="flex items-center gap-2 bg-[#13141a] px-3 py-1.5 rounded border border-[#262930]/80">
+                              <span className="font-mono text-xs text-[#7c8cff] truncate select-all flex-1">
+                                {getSentryDsn(project)}
+                              </span>
                               <button
                                 type="button"
-                                disabled={isBusy}
-                                onClick={() => handleStartGitHubOAuth(proj)}
-                                className="flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-gray-900 hover:bg-black dark:bg-purple-600 dark:hover:bg-purple-700 text-white shadow-xs transition-colors shrink-0"
+                                onClick={() => handleCopy(getSentryDsn(project), `dsn_inner_${project.project_id}`)}
+                                className="text-[#8b90a0] hover:text-white transition-colors"
                               >
-                                <Github className="w-4 h-4" />
-                                <span>Connect GitHub Repository</span>
+                                {copiedKey === `dsn_inner_${project.project_id}` ? (
+                                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                ) : (
+                                  <Copy className="w-3.5 h-3.5" />
+                                )}
                               </button>
                             </div>
-                          ) : (
-                            <div className="p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/5 space-y-3">
-                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-500/20 pb-2.5">
-                                <div className="flex items-center gap-2">
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                                    Active &amp; Authorized
+                          </div>
+
+                          {/* Details Grid */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                            {/* Left: Telemetry & Ingestion Config */}
+                            <div className="p-3 rounded-lg bg-[#0d0e12]/60 border border-[#262930] space-y-2">
+                              <span className="text-[11px] font-semibold text-[#8b90a0] uppercase tracking-wider block">
+                                Telemetry &amp; Rate Limits
+                              </span>
+                              <div className="space-y-1.5 font-mono text-[11px]">
+                                <div className="flex justify-between py-1 border-b border-[#262930]/40">
+                                  <span className="text-[#8b90a0]">Environment:</span>
+                                  <span className="text-[#e7e9ee] font-semibold uppercase">{project.environment || 'production'}</span>
+                                </div>
+                                <div className="flex justify-between py-1 border-b border-[#262930]/40">
+                                  <span className="text-[#8b90a0]">Rate Limit:</span>
+                                  <span className="text-[#e7e9ee]">{project.rate_limit_min || 120} req/min</span>
+                                </div>
+                                <div className="flex justify-between py-1 border-b border-[#262930]/40">
+                                  <span className="text-[#8b90a0]">Window Period:</span>
+                                  <span className="text-[#e7e9ee]">{project.window_hours || 48} hours</span>
+                                </div>
+                                <div className="flex justify-between py-1">
+                                  <span className="text-[#8b90a0]">Created:</span>
+                                  <span className="text-[#e7e9ee]">{formatRelativeTime(project.created_at)}</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Right: GitHub Triage & Automation */}
+                            <div className="p-3 rounded-lg bg-[#0d0e12]/60 border border-[#262930] space-y-2">
+                              <span className="text-[11px] font-semibold text-[#8b90a0] uppercase tracking-wider block">
+                                GitHub Triage &amp; Automation
+                              </span>
+                              <div className="space-y-1.5 font-mono text-[11px]">
+                                <div className="flex justify-between py-1 border-b border-[#262930]/40 items-center">
+                                  <span className="text-[#8b90a0]">Repository:</span>
+                                  {project.github_repo || project.github_repo_override ? (
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-purple-400 font-semibold truncate max-w-[140px]">
+                                        {project.github_repo || project.github_repo_override}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenSwitchRepo(project)}
+                                        className="text-[10px] text-[#8b90a0] hover:text-[#e7e9ee] underline font-sans"
+                                      >
+                                        switch
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleStartGitHubOAuth(project)}
+                                      className="text-xs text-purple-400 hover:text-purple-300 font-sans underline"
+                                    >
+                                      Connect Repo
+                                    </button>
+                                  )}
+                                </div>
+                                <div className="flex justify-between py-1 border-b border-[#262930]/40">
+                                  <span className="text-[#8b90a0]">Fallback Assignee:</span>
+                                  <span className="text-[#e7e9ee]">{project.fallback_assignee || 'None'}</span>
+                                </div>
+                                <div className="flex justify-between py-1 border-b border-[#262930]/40">
+                                  <span className="text-[#8b90a0]">Prefix Strip:</span>
+                                  <span className="text-[#e7e9ee]">{project.path_prefix_strip || 'src/'}</span>
+                                </div>
+                                <div className="flex justify-between py-1">
+                                  <span className="text-[#8b90a0]">Slack Alerting:</span>
+                                  <span className="text-[#e7e9ee]">
+                                    {project.slack_channel_override ? `#${project.slack_channel_override}` : 'Default Channel'}
                                   </span>
                                 </div>
-
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <button
-                                    type="button"
-                                    disabled={isBusy}
-                                    onClick={() => handleOpenSwitchRepo(proj)}
-                                    className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-text-secondary hover:text-text-primary bg-surface hover:bg-hover rounded border border-border-subtle shadow-2xs transition-colors"
-                                  >
-                                    <RefreshCw className={`w-3 h-3 ${isBusy ? 'animate-spin' : ''}`} />
-                                    <span>Switch Repo</span>
-                                  </button>
-
-                                  {proj.github_installation_id && (
-                                    <a
-                                      href={`https://github.com/settings/installations/${proj.github_installation_id}`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-text-secondary hover:text-text-primary bg-surface hover:bg-hover rounded border border-border-subtle shadow-2xs transition-colors"
-                                    >
-                                      <Settings className="w-3 h-3 text-text-muted" />
-                                      <span>Manage on GitHub</span>
-                                      <ExternalLink className="w-2.5 h-2.5" />
-                                    </a>
-                                  )}
-
-                                  <button
-                                    type="button"
-                                    disabled={isBusy}
-                                    onClick={() => handleDisconnectRepo(proj)}
-                                    className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-red-500 hover:text-red-600 hover:bg-red-500/10 rounded border border-transparent hover:border-red-500/20 transition-colors"
-                                  >
-                                    <X className="w-3 h-3" />
-                                    <span>Revoke Access</span>
-                                  </button>
-                                </div>
-                              </div>
-
-                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 text-xs">
-                                <div className="flex items-center gap-1.5">
-                                  <Github className="w-3.5 h-3.5 text-text-muted shrink-0" />
-                                  <span className="text-text-muted">Repository:</span>
-                                  <a
-                                    href={`https://github.com/${boundRepo}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="font-mono text-purple-600 dark:text-purple-400 hover:underline font-semibold truncate flex items-center gap-1"
-                                  >
-                                    <span>{boundRepo}</span>
-                                    <ExternalLink className="w-2.5 h-2.5" />
-                                  </a>
-                                </div>
-
-                                <div className="flex items-center gap-1.5 font-mono text-[11px]">
-                                  <span className="text-text-muted">Branch:</span>
-                                  <span className="text-text-primary font-medium">main</span>
-                                  <span className="text-text-muted">•</span>
-                                  <span className="text-text-muted">App ID:</span>
-                                  <span className="text-text-primary">{proj.github_installation_id || '5344746'}</span>
-                                </div>
-
-                                <div className="flex items-center gap-1.5 font-mono text-[11px]">
-                                  <span className="text-text-muted">Assignee:</span>
-                                  <span className="text-text-primary">@{proj.fallback_assignee || 'dynamic'}</span>
-                                  <span className="text-text-muted">•</span>
-                                  <span className="text-text-muted">Strip:</span>
-                                  <span className="text-text-primary">{proj.path_prefix_strip || 'src/'}</span>
-                                </div>
                               </div>
                             </div>
-                          )}
-                        </div>
+                          </div>
 
-                        {/* 4. Footer Telemetry Info */}
-                        <div className="px-4 sm:px-5 py-2.5 bg-surface-sunken border-t border-border-subtle flex flex-wrap items-center justify-between gap-3 text-[11px] text-text-muted">
-                          <div className="flex items-center gap-1.5">
-                            <MessageSquare className="w-3.5 h-3.5 text-purple-500" />
-                            <span>SLACK DISPATCH:</span>
-                            <span className="font-mono text-text-primary font-medium">
-                              {proj.slack_channel_override || '#eng-incidents'}
-                            </span>
-                            {proj.webhook_url && (
-                              <span className="text-emerald-600 font-semibold">(Dedicated Webhook)</span>
+                          {/* Action Buttons Toolbar */}
+                          <div className="pt-2 flex flex-wrap items-center justify-between gap-2 border-t border-[#262930]/60">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleOpenDashboard(project.project_id)}
+                                className="px-3 py-1.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white font-medium text-xs flex items-center gap-1.5 shadow-xs transition-all"
+                              >
+                                <Server className="w-3.5 h-3.5" />
+                                Open Dashboard
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleFilterRuns(project.project_id)}
+                                className="px-3 py-1.5 rounded-md bg-[#171921] hover:bg-[#262930] text-[#e7e9ee] border border-[#262930] text-xs flex items-center gap-1.5 transition-all"
+                              >
+                                <Activity className="w-3.5 h-3.5 text-blue-400" />
+                                View Incident Runs
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setSdkModalProject(project)}
+                                className="px-3 py-1.5 rounded-md bg-[#171921] hover:bg-[#262930] text-[#e7e9ee] border border-[#262930] text-xs flex items-center gap-1.5 transition-all"
+                              >
+                                <Code className="w-3.5 h-3.5 text-emerald-400" />
+                                SDK Setup
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenSettingsModal(project)}
+                                className="px-3 py-1.5 rounded-md bg-[#171921] hover:bg-[#262930] text-[#e7e9ee] border border-[#262930] text-xs flex items-center gap-1.5 transition-all"
+                              >
+                                <Sliders className="w-3.5 h-3.5 text-purple-400" />
+                                Service Settings
+                              </button>
+                            </div>
+
+                            {project.project_id !== 'proj_default' && (
+                              <button
+                                type="button"
+                                onClick={() => handleDelete(project)}
+                                disabled={actionLoadingId === project.project_id}
+                                className="px-2.5 py-1.5 rounded-md hover:bg-red-500/20 text-[#8b90a0] hover:text-red-400 text-xs flex items-center gap-1 transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                Delete
+                              </button>
                             )}
                           </div>
-
-                          <div className="flex items-center gap-4 flex-wrap">
-                            <div>
-                              <span>RATE QUOTA: </span>
-                              <span className="font-medium text-text-secondary">{proj.rate_limit_min} req/min</span>
-                            </div>
-
-                            <div>
-                              <span>POLICY: </span>
-                              <span className="font-medium text-text-secondary uppercase">
-                                {proj.automation_mode_override || 'Fleet Default'}
-                              </span>
-                            </div>
-
-                            <div className="flex items-center gap-1 text-text-secondary">
-                              <Shield className="w-3 h-3 text-purple-500" />
-                              <span>TENANT: </span>
-                              <span className="font-mono font-medium">
-                                {isGlobal ? 'Global Fleet' : currentWorkspace}
-                              </span>
-                            </div>
-                          </div>
                         </div>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </motion.div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               );
             })}
           </div>
 
-          {/* Right Side (30% Width) - Scrollable Mission Control Index */}
-          <div className="lg:col-span-3 sticky top-4 space-y-3">
-            <div className="rounded-xl border border-border-subtle bg-surface p-4 shadow-xs space-y-3">
-              <div className="flex items-center justify-between border-b border-border-subtle pb-2.5">
+          {/* Sticky Mission Control Index Column (30%): order-1 lg:order-2 */}
+          <aside className="lg:col-span-3 lg:sticky lg:top-4 space-y-4 order-1 lg:order-2">
+            {/* Fleet Index Card */}
+            <div className="rounded-xl bg-[#13141a] border border-[#262930] p-4 shadow-lg space-y-3">
+              <div className="flex items-center justify-between border-b border-[#262930] pb-2.5">
                 <div className="flex items-center gap-2">
-                  <Compass className="w-4 h-4 text-purple-600 dark:text-purple-400" />
-                  <h2 className="text-xs font-bold text-text-primary uppercase tracking-wider">
-                    Mission Control Index
-                  </h2>
+                  <Layers className="w-4 h-4 text-purple-400" />
+                  <h3 className="font-bold text-xs uppercase tracking-wider text-[#e7e9ee]">
+                    Fleet Mission Control
+                  </h3>
                 </div>
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
-                  {projects.length} Services
+                <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-[#171921] text-[#8b90a0] border border-[#262930]">
+                  {projects.length} Total
                 </span>
               </div>
 
-              <p className="text-[11px] text-text-muted leading-tight">
-                Click any service below to center and expand its inline telemetry workspace.
+              <p className="text-[11px] text-[#8b90a0]">
+                Click an active service to scroll into view. Minimized services show a glowing dot—click to restore with spring physics.
               </p>
 
-              <div className="space-y-2 max-h-[calc(100vh-220px)] overflow-y-auto pr-0.5">
-                {projects.map((proj) => {
-                  const isSelected = expandedProjectId === proj.project_id;
-                  const boundRepo = proj.github_repo || proj.github_repo_override;
-
+              <div className="space-y-1.5 max-h-[460px] overflow-y-auto pr-1">
+                {projects.map((p) => {
+                  const isMin = !!minimizedMap[p.project_id];
+                  const isPulse = pulsingIdxId === p.project_id;
+                  const envCfg = getEnvConfig(p.environment);
                   return (
-                    <motion.div
-                      key={`index-${proj.project_id}`}
-                      whileHover={{ scale: 1.01 }}
-                      transition={{ type: 'spring', stiffness: 400, damping: 25 }}
-                      onClick={() => handleSelectAndScrollTo(proj.project_id)}
-                      className={`p-3 rounded-lg border cursor-pointer transition-all flex flex-col gap-1.5 ${
-                        isSelected
-                          ? 'border-purple-600 dark:border-purple-500 bg-purple-500/10 shadow-xs ring-1 ring-purple-500/30'
-                          : 'border-border-subtle bg-surface hover:bg-surface-raised hover:border-border-strong'
+                    <div
+                      key={p.project_id}
+                      ref={(el) => { idxRefs.current[p.project_id] = el; }}
+                      onClick={() => handleRestore(p.project_id)}
+                      className={`fleet-idx group flex items-center justify-between p-2.5 rounded-lg border transition-all cursor-pointer ${
+                        isPulse ? 'pulse' : ''
+                      } ${
+                        isMin
+                          ? 'bg-[#171921]/60 border-purple-500/40 hover:border-purple-400'
+                          : 'bg-[#0d0e12] border-[#262930] hover:border-[#7c8cff]/40 hover:bg-[#171921]'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <div
-                            className={`w-5 h-5 rounded flex items-center justify-center font-bold text-[10px] shrink-0 ${
-                              isSelected
-                                ? 'bg-purple-600 text-white'
-                                : 'bg-surface-sunken text-text-secondary border border-border-subtle'
-                            }`}
-                          >
-                            {proj.name.charAt(0).toUpperCase()}
-                          </div>
-                          <span
-                            className={`text-xs font-semibold truncate ${
-                              isSelected ? 'text-purple-600 dark:text-purple-300' : 'text-text-primary'
-                            }`}
-                          >
-                            {proj.name}
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${envCfg.dotClass}`} />
+                        <div className="min-w-0">
+                          <span className="font-semibold text-xs text-[#e7e9ee] block truncate group-hover:text-white">
+                            {p.name}
+                          </span>
+                          <span className="font-mono text-[10px] text-[#8b90a0] block truncate">
+                            {p.project_id}
                           </span>
                         </div>
-
-                        <span className="flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 shrink-0">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                          <span className="hidden xl:inline">Operational</span>
-                        </span>
                       </div>
 
-                      <div className="flex items-center justify-between text-[10px] text-text-muted font-mono pt-1 border-t border-border-subtle/40">
-                        <span className="truncate max-w-[110px]">{proj.project_id}</span>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <span className="uppercase text-[9px] px-1 py-0.2 rounded bg-surface-sunken border border-border-subtle text-text-secondary">
-                            {proj.environment || 'PROD'}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {isMin ? (
+                          <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                            <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-ping" />
+                            RESTORE
                           </span>
-                          {boundRepo ? (
-                            <span title={boundRepo} className="text-purple-600 dark:text-purple-400">
-                              <Github className="w-3 h-3" />
-                            </span>
-                          ) : (
-                            <span title="No GitHub linked" className="text-amber-500">
-                              <AlertCircle className="w-3 h-3" />
-                            </span>
-                          )}
-                        </div>
+                        ) : (
+                          <span className={`px-1.5 py-0.5 text-[9px] font-mono font-bold rounded border ${envCfg.pillClass}`}>
+                            {envCfg.label}
+                          </span>
+                        )}
                       </div>
-                    </motion.div>
+                    </div>
                   );
                 })}
               </div>
+            </div>
 
-              {/* Quick Fleet Metrics Summary in Sidebar */}
-              <div className="pt-2 border-t border-border-subtle/60 grid grid-cols-2 gap-2 text-[10px]">
-                <div className="p-2 rounded bg-surface-sunken border border-border-subtle/50">
-                  <span className="text-text-muted block">Linked Repos</span>
-                  <span className="font-bold text-xs text-text-primary">
+            {/* Workspace Overview Telemetry Stats */}
+            <div className="rounded-xl bg-[#13141a] border border-[#262930] p-4 shadow-lg space-y-3">
+              <div className="flex items-center gap-2">
+                <Compass className="w-4 h-4 text-purple-400" />
+                <h3 className="font-bold text-xs uppercase tracking-wider text-[#e7e9ee]">
+                  Workspace Health
+                </h3>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
+                <div className="p-2.5 rounded bg-[#0d0e12] border border-[#262930]">
+                  <span className="text-[#8b90a0] block text-[10px]">Total Services</span>
+                  <span className="font-bold text-sm text-[#e7e9ee]">{projects.length}</span>
+                </div>
+                <div className="p-2.5 rounded bg-[#0d0e12] border border-[#262930]">
+                  <span className="text-[#8b90a0] block text-[10px]">Production</span>
+                  <span className="font-bold text-sm text-emerald-400">
+                    {projects.filter((p) => (p.environment || '').toLowerCase().includes('prod')).length}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded bg-[#0d0e12] border border-[#262930]">
+                  <span className="text-[#8b90a0] block text-[10px]">GitHub Linked</span>
+                  <span className="font-bold text-sm text-purple-400">
                     {projects.filter((p) => p.github_repo || p.github_repo_override).length} / {projects.length}
                   </span>
                 </div>
-                <div className="p-2 rounded bg-surface-sunken border border-border-subtle/50">
-                  <span className="text-text-muted block">Ingestion DSNs</span>
-                  <span className="font-bold text-xs text-emerald-600 dark:text-emerald-400">
-                    {projects.length} Active
-                  </span>
+                <div className="p-2.5 rounded bg-[#0d0e12] border border-[#262930]">
+                  <span className="text-[#8b90a0] block text-[10px]">Active Ingest DSNs</span>
+                  <span className="font-bold text-sm text-cyan-400">{projects.length}</span>
                 </div>
               </div>
             </div>
-          </div>
+          </aside>
         </div>
       )}
 
