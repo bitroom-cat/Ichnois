@@ -202,7 +202,8 @@
 .fleet-body {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 0.55s var(--fleet-spring);
+  transition: grid-template-rows 0.45s var(--fleet-spring);
+  overflow: hidden;
 }
 .fleet-card.open .fleet-body {
   grid-template-rows: 1fr;
@@ -212,15 +213,23 @@
   overflow: hidden;
 }
 .fleet-inner {
+  min-height: 0;
+  overflow: hidden;
   padding: 0 18px 18px;
   opacity: 0;
   transform: translateY(-8px);
-  transition: opacity 0.25s, transform 0.5s var(--fleet-spring);
+  transition: opacity 0.25s, transform 0.45s var(--fleet-spring);
 }
 .fleet-card.open .fleet-inner {
   opacity: 1;
   transform: none;
-  transition: opacity 0.45s ease 0.12s, transform 0.6s var(--fleet-spring) 0.05s;
+  transition: opacity 0.35s ease 0.08s, transform 0.45s var(--fleet-spring) 0.04s;
+}
+.fleet-card .chevron-icon {
+  transition: transform 0.35s var(--fleet-spring);
+}
+.fleet-card.open .chevron-icon {
+  transform: rotate(180deg);
 }
 
 .fleet-idx.pulse {

@@ -153,7 +153,10 @@ export default function ProjectsPage() {
   }, []);
 
   const toggleCard = (projectId: string) => {
-    setOpenMap((prev) => ({ ...prev, [projectId]: !prev[projectId] }));
+    setOpenMap((prev) => {
+      const isCurrentlyOpen = !!prev[projectId];
+      return isCurrentlyOpen ? {} : { [projectId]: true };
+    });
   };
 
   // Handle 1-Click GitHub App OAuth Redirect Back
@@ -351,11 +354,18 @@ export default function ProjectsPage() {
     return `${ox}% ${oy}%`;
   };
 
-  const genieFrames = (origin: string): Keyframe[] => [
-    { transform: 'translate3d(0,0,0) scale(1)', clipPath: 'polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%)', opacity: 1, transformOrigin: origin },
-    { transform: 'translate3d(0, -6px, 0) scale(0.94, 0.9)', clipPath: 'polygon(3% 0%, 97% 0%, 82% 100%, 18% 100%)', opacity: 0.95, offset: 0.35, transformOrigin: origin },
-    { transform: 'translate3d(0, -18px, 0) scale(0.5, 0.3)', clipPath: 'polygon(12% 0%, 88% 0%, 58% 100%, 42% 100%)', opacity: 0.6, offset: 0.7, transformOrigin: origin },
-    { transform: 'translate3d(0, -28px, 0) scale(0.04, 0.04)', clipPath: 'polygon(45% 0%, 55% 0%, 51% 100%, 49% 100%)', opacity: 0, transformOrigin: origin },
+  const genieMinimizeFrames = (origin: string): Keyframe[] => [
+    { transform: 'translate3d(0,0,0) scale(1)', clipPath: 'polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%)', opacity: 1, transformOrigin: origin, offset: 0 },
+    { transform: 'translate3d(0, -6px, 0) scale(0.94, 0.9)', clipPath: 'polygon(3% 0%, 97% 0%, 82% 100%, 18% 100%)', opacity: 0.95, transformOrigin: origin, offset: 0.35 },
+    { transform: 'translate3d(0, -18px, 0) scale(0.5, 0.3)', clipPath: 'polygon(12% 0%, 88% 0%, 58% 100%, 42% 100%)', opacity: 0.6, transformOrigin: origin, offset: 0.7 },
+    { transform: 'translate3d(0, -28px, 0) scale(0.04, 0.04)', clipPath: 'polygon(45% 0%, 55% 0%, 51% 100%, 49% 100%)', opacity: 0, transformOrigin: origin, offset: 1 },
+  ];
+
+  const genieRestoreFrames = (origin: string): Keyframe[] => [
+    { transform: 'translate3d(0, -28px, 0) scale(0.04, 0.04)', clipPath: 'polygon(45% 0%, 55% 0%, 51% 100%, 49% 100%)', opacity: 0, transformOrigin: origin, offset: 0 },
+    { transform: 'translate3d(0, -18px, 0) scale(0.5, 0.3)', clipPath: 'polygon(12% 0%, 88% 0%, 58% 100%, 42% 100%)', opacity: 0.6, transformOrigin: origin, offset: 0.3 },
+    { transform: 'translate3d(0, -6px, 0) scale(0.94, 0.9)', clipPath: 'polygon(3% 0%, 97% 0%, 82% 100%, 18% 100%)', opacity: 0.95, transformOrigin: origin, offset: 0.65 },
+    { transform: 'translate3d(0,0,0) scale(1)', clipPath: 'polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%)', opacity: 1, transformOrigin: origin, offset: 1 },
   ];
 
   const handleMinimize = (projectId: string, e?: React.MouseEvent) => {
@@ -364,7 +374,7 @@ export default function ProjectsPage() {
     const idx = idxRefs.current[projectId];
     if (card && idx) {
       const origin = anchorOrigin(card, idx);
-      const anim = card.animate(genieFrames(origin), {
+      const anim = card.animate(genieMinimizeFrames(origin), {
         duration: 720,
         easing: 'cubic-bezier(.55, 0, .75, .2)',
       });
@@ -383,12 +393,13 @@ export default function ProjectsPage() {
   const handleRestore = (projectId: string) => {
     if (minimizedMap[projectId]) {
       setMinimizedMap((prev) => ({ ...prev, [projectId]: false }));
+      setOpenMap({ [projectId]: true });
       requestAnimationFrame(() => {
         const card = cardRefs.current[projectId];
         const idx = idxRefs.current[projectId];
         if (card && idx) {
           const origin = anchorOrigin(card, idx);
-          const anim = card.animate(genieFrames(origin).slice().reverse(), {
+          const anim = card.animate(genieRestoreFrames(origin), {
             duration: 900,
             easing: 'cubic-bezier(.25, 1, .5, 1)',
           });
@@ -402,7 +413,7 @@ export default function ProjectsPage() {
         }
       });
     } else {
-      setOpenMap((prev) => ({ ...prev, [projectId]: true }));
+      setOpenMap({ [projectId]: true });
       const slot = slotRefs.current[projectId];
       if (slot) {
         slot.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -773,7 +784,8 @@ export default function ProjectsPage() {
 
                       {/* Expanded Detail Body */}
                       <div className="fleet-body">
-                        <div className="fleet-inner p-4 pt-0 space-y-4 border-t border-[#262930]/60">
+                        <div className="fleet-clip">
+                          <div className="fleet-inner p-4 pt-0 space-y-4 border-t border-[#262930]/60">
                           {/* Telemetry DSN Banner */}
                           <div className="mt-3 p-3 rounded-lg bg-[#0d0e12] border border-[#262930] space-y-2">
                             <div className="flex items-center justify-between">
@@ -939,6 +951,7 @@ export default function ProjectsPage() {
                         </div>
                       </div>
                     </div>
+                    </div>
                   </div>
                 </div>
               );
@@ -1010,38 +1023,6 @@ export default function ProjectsPage() {
                     </div>
                   );
                 })}
-              </div>
-            </div>
-
-            {/* Workspace Overview Telemetry Stats */}
-            <div className="rounded-xl bg-[#13141a] border border-[#262930] p-4 shadow-lg space-y-3">
-              <div className="flex items-center gap-2">
-                <Compass className="w-4 h-4 text-purple-400" />
-                <h3 className="font-bold text-xs uppercase tracking-wider text-[#e7e9ee]">
-                  Workspace Health
-                </h3>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
-                <div className="p-2.5 rounded bg-[#0d0e12] border border-[#262930]">
-                  <span className="text-[#8b90a0] block text-[10px]">Total Services</span>
-                  <span className="font-bold text-sm text-[#e7e9ee]">{projects.length}</span>
-                </div>
-                <div className="p-2.5 rounded bg-[#0d0e12] border border-[#262930]">
-                  <span className="text-[#8b90a0] block text-[10px]">Production</span>
-                  <span className="font-bold text-sm text-emerald-400">
-                    {projects.filter((p) => (p.environment || '').toLowerCase().includes('prod')).length}
-                  </span>
-                </div>
-                <div className="p-2.5 rounded bg-[#0d0e12] border border-[#262930]">
-                  <span className="text-[#8b90a0] block text-[10px]">GitHub Linked</span>
-                  <span className="font-bold text-sm text-purple-400">
-                    {projects.filter((p) => p.github_repo || p.github_repo_override).length} / {projects.length}
-                  </span>
-                </div>
-                <div className="p-2.5 rounded bg-[#0d0e12] border border-[#262930]">
-                  <span className="text-[#8b90a0] block text-[10px]">Active Ingest DSNs</span>
-                  <span className="font-bold text-sm text-cyan-400">{projects.length}</span>
-                </div>
               </div>
             </div>
           </aside>
