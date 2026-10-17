@@ -41,7 +41,6 @@ export interface SystemSettings {
   slack_channel: string;
   slack_enabled: boolean;
   slack_webhook_url?: string;
-  admin_token?: string;
   auto_comment_duplicates: boolean;
   automation_mode?: 'full_manual' | 'semi_autonomous' | 'fully_autonomous';
 }
@@ -80,8 +79,110 @@ export interface PolicyDocument {
   updated_at?: number;
 }
 
+export interface Project {
+  project_id: string;
+  name: string;
+  description?: string;
+  webhook_url?: string;
+  public_key: string;
+  secret_key?: string;
+  rate_limit_min: number;
+  environment: string;
+  github_repo_override?: string | null;
+  slack_channel_override?: string | null;
+  github_installation_id?: string | null;
+  github_repo?: string | null;
+  fallback_assignee?: string | null;
+  path_prefix_strip?: string | null;
+  window_hours?: number;
+  automation_mode_override?: string | null;
+  is_active: boolean;
+  created_at: number;
+  updated_at?: number;
+}
+
+export interface ProjectSummary {
+  project_id: string;
+  name: string;
+  description?: string;
+  github_repo?: string | null;
+  total_runs: number;
+  open_p1_count: number;
+  open_p2_count: number;
+  staged_raw_count: number;
+  staged_draft_count: number;
+  status: 'healthy' | 'degraded' | 'critical';
+  health_score: number;
+  last_incident_time?: string | null;
+}
+
+export interface WorkspaceMetrics {
+  total_runs: number;
+  staged_raw_count: number;
+  staged_draft_count: number;
+  published_count: number;
+  dismissed_count: number;
+  active_projects_count: number;
+  incident_rate_per_min: number;
+  project_id: string;
+  projects?: ProjectSummary[];
+}
+
+export interface GitHubRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  owner?: string;
+  private: boolean;
+  html_url: string;
+  description?: string | null;
+  default_branch?: string;
+}
+
+export interface ProjectCreateInput {
+  name: string;
+  environment?: string;
+  rate_limit_min?: number;
+  github_repo_override?: string;
+  slack_channel_override?: string;
+  webhook_url?: string;
+  fallback_assignee?: string;
+  path_prefix_strip?: string;
+  window_hours?: number;
+  automation_mode_override?: string;
+}
+
+export interface ProjectUpdateInput {
+  name?: string;
+  environment?: string;
+  rate_limit_min?: number;
+  github_repo_override?: string | null;
+  slack_channel_override?: string | null;
+  github_installation_id?: string | null;
+  github_repo?: string | null;
+  webhook_url?: string | null;
+  fallback_assignee?: string | null;
+  path_prefix_strip?: string | null;
+  window_hours?: number | null;
+  automation_mode_override?: string | null;
+  is_active?: boolean;
+}
+
+export function getSelectedProjectId(): string {
+  if (typeof window === 'undefined') return 'all';
+  return localStorage.getItem('ichnoscope_selected_project_id') || 'all';
+}
+
+export function setSelectedProjectId(projectId: string): void {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('ichnoscope_selected_project_id', projectId);
+    window.dispatchEvent(new CustomEvent('project_changed', { detail: { projectId } }));
+  }
+}
+
 export interface RunItem {
   id: string;
+  project_id?: string;
   status: any;
   severity: any;
   fingerprint: string;
@@ -149,11 +250,63 @@ export interface RunItem {
 }
 
 export const BACKEND_URL =
-  process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  (process.env.NODE_ENV === 'production'
+    ? 'https://ichnoscope-backend.onrender.com'
+    : 'http://localhost:8000');
 
 export const USE_MOCK_API = false; // Primary live mode with automatic fallback
 
 const STORAGE_KEY = 'ichnoscope_runs_v2';
+
+export function getAdminToken(): string | null {
+  const envToken = process.env.NEXT_PUBLIC_ADMIN_TOKEN;
+  if (envToken) return envToken;
+  if (typeof window !== 'undefined') {
+    const local = localStorage.getItem('ichnoscope_admin_token');
+    if (local) return local;
+  }
+  return null;
+}
+
+export function setAdminToken(token: string) {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('ichnoscope_admin_token', token);
+  }
+}
+
+export async function getCurrentUserToken(): Promise<string | null> {
+  if (typeof window === 'undefined') return null;
+  try {
+    const { createClient } = await import('@/lib/supabase/client');
+    const supabase = createClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    return session?.access_token || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers || {});
+  const userToken = await getCurrentUserToken();
+  syncUserCacheScope(userToken);
+
+  if (userToken) {
+    // Authenticated user session: pass user Bearer JWT, NEVER send X-Admin-Token
+    headers.set('Authorization', `Bearer ${userToken}`);
+    headers.delete('X-Admin-Token');
+  } else if (!headers.has('Authorization')) {
+    // Internal fallback for unauthenticated environments without session
+    const adminToken = getAdminToken();
+    if (adminToken) {
+      headers.set('Authorization', `Bearer ${adminToken}`);
+      headers.set('X-Admin-Token', adminToken);
+    }
+  }
+
+  return fetch(url, { ...init, headers });
+}
 
 function formatBackendRun(b: any): RunItem {
   const inc = b.incident || {};
@@ -190,6 +343,7 @@ function formatBackendRun(b: any): RunItem {
 
   return {
     id: b.id,
+    project_id: b.project_id || b.projectId || inc.project_id || undefined,
     status:
       b.status === 'staged_raw'
         ? 'staged_raw'
@@ -267,17 +421,12 @@ function formatBackendRun(b: any): RunItem {
 }
 
 function getStoredRuns(): RunDetail[] {
-  if (typeof window === 'undefined') return MOCK_RUNS;
-  try {
-    const data = localStorage.getItem(STORAGE_KEY);
-    if (!data) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(MOCK_RUNS));
-      return MOCK_RUNS;
-    }
-    return JSON.parse(data);
-  } catch {
-    return MOCK_RUNS;
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {}
   }
+  return [];
 }
 
 function saveStoredRuns(runs: RunDetail[]) {
@@ -292,6 +441,7 @@ function saveStoredRuns(runs: RunDetail[]) {
 function toRunItem(r: any): RunItem {
   return {
     id: r.id,
+    project_id: r.project_id || r.projectId || 'checkout-service',
     status:
       r.status === 'staged_raw'
         ? 'staged_raw'
@@ -377,7 +527,6 @@ const DEFAULT_SETTINGS: SystemSettings = {
   slack_channel: '#eng-incidents',
   slack_enabled: true,
   slack_webhook_url: '',
-  admin_token: '',
   auto_comment_duplicates: true,
 };
 
@@ -424,44 +573,78 @@ const DEFAULT_HEALTH: DependencyHealth[] = [
   },
 ];
 
+let _currentCacheToken: string | null = null;
+
+let _projectsCache: { data: Project[]; time: number } | null = null;
+let _projectsInFlight: Promise<Project[]> | null = null;
+
+let _metricsCache: Record<string, { data: WorkspaceMetrics; time: number } | undefined> = {};
+let _metricsInFlight: Record<string, Promise<WorkspaceMetrics> | undefined> = {};
+
+let _usersCache: { data: WorkspaceMember[]; time: number } | null = null;
+let _workspacesCache: { data: WorkspaceItem[]; time: number } | null = null;
+
+export function invalidateClientCache(): void {
+  _projectsCache = null;
+  _projectsInFlight = null;
+  _metricsCache = {};
+  _metricsInFlight = {};
+  _usersCache = null;
+  _workspacesCache = null;
+}
+
+export function syncUserCacheScope(token: string | null): void {
+  if (token !== _currentCacheToken) {
+    invalidateClientCache();
+    _currentCacheToken = token;
+  }
+}
+
 export const api = {
-  getRuns: async (): Promise<any[]> => {
+  getRuns: async (projectId?: string): Promise<any[]> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs`, { cache: 'no-store' });
+      const targetProj = projectId && projectId !== 'all' ? projectId : undefined;
+      const url = targetProj
+        ? `${BACKEND_URL}/api/runs?project_id=${encodeURIComponent(targetProj)}`
+        : `${BACKEND_URL}/api/runs`;
+      const res = await apiFetch(url, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
+        if (Array.isArray(data)) {
           return data.map(formatBackendRun);
         }
       }
     } catch {
-      // Backend not running; fallback to local storage
+      // Backend not running
     }
 
-    const runs = getStoredRuns();
-    return runs.map(toRunItem);
+    return [];
   },
 
   getRunById: async (id: string): Promise<any | null> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}`, { cache: 'no-store' });
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         return formatBackendRun(data);
       }
     } catch {
-      // Backend not running; fallback to local storage
+      // Backend not running
     }
 
+    // Fallback: check locally stored runs
     const runs = getStoredRuns();
-    const r = runs.find((item) => item.id === id);
-    if (!r) return null;
-    return toRunItem(r);
+    const found = runs.find((r) => r.id === id);
+    if (found) {
+      return toRunItem(found);
+    }
+
+    return null;
   },
 
   approveRun: async (id: string): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/approve`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/approve`, {
         method: 'POST',
       });
       if (res.ok) {
@@ -500,7 +683,7 @@ export const api = {
 
   rejectRun: async (id: string, reason?: string): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/reject`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/reject`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason }),
@@ -539,7 +722,7 @@ export const api = {
 
   gate1Approve: async (id: string, options?: { reviewer?: string; notes?: string }): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate1/approve`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/gate1/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(options || {}),
@@ -571,7 +754,7 @@ export const api = {
 
   gate1Dismiss: async (id: string, options?: { reviewer?: string; reason?: string }): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate1/dismiss`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/gate1/dismiss`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(options || {}),
@@ -612,7 +795,7 @@ export const api = {
     }
   ): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate2/approve`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/gate2/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(options || {}),
@@ -628,7 +811,7 @@ export const api = {
 
   gate2Reject: async (id: string, options?: { reviewer?: string; reason?: string }): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/gate2/reject`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/gate2/reject`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(options || {}),
@@ -647,7 +830,7 @@ export const api = {
     data: { draft_title?: string; draft_body?: string; custom_assignee?: string }
   ): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/draft`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/draft`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -676,7 +859,7 @@ export const api = {
 
   getPolicies: async (): Promise<{ default_mode: string; policies: PolicyDocument[] }> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/policies`, { cache: 'no-store' });
+      const res = await apiFetch(`${BACKEND_URL}/api/policies`, { cache: 'no-store' });
       if (res.ok) {
         return await res.json();
       }
@@ -717,7 +900,7 @@ export const api = {
 
   upsertPolicy: async (policy: { id?: string; name: string; is_active: boolean; rule: any }): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/policies`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/policies`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(policy),
@@ -733,7 +916,7 @@ export const api = {
 
   rerunTriage: async (id: string): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/${id}/rerun`, { method: 'POST' });
+      const res = await apiFetch(`${BACKEND_URL}/api/runs/${id}/rerun`, { method: 'POST' });
       if (res.ok) {
         const updated = await api.getRunById(id);
         return updated;
@@ -767,7 +950,7 @@ export const api = {
 
   getHealth: async (): Promise<DependencyHealth[]> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/health`, { cache: 'no-store' });
+      const res = await apiFetch(`${BACKEND_URL}/api/health`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
@@ -791,7 +974,7 @@ export const api = {
 
   getSettings: async (): Promise<SystemSettings> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/settings`, { cache: 'no-store' });
+      const res = await apiFetch(`${BACKEND_URL}/api/settings`, { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         return {
@@ -808,7 +991,6 @@ export const api = {
           slack_channel: '#eng-incidents',
           slack_enabled: Boolean(data.slack_webhook_url),
           slack_webhook_url: data.slack_webhook_url || '',
-          admin_token: data.admin_token || '',
           auto_comment_duplicates: true,
           automation_mode: data.automation_mode || 'semi_autonomous',
         };
@@ -839,10 +1021,9 @@ export const api = {
         p2_events: settings.p2_events,
         dry_run: settings.dry_run,
         slack_webhook_url: settings.slack_webhook_url,
-        admin_token: settings.admin_token,
         automation_mode: settings.automation_mode,
       };
-      const res = await fetch(`${BACKEND_URL}/api/settings`, {
+      const res = await apiFetch(`${BACKEND_URL}/api/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -854,7 +1035,6 @@ export const api = {
           github_repo: data.github_repository ?? settings.github_repo,
           fallback_assignee: data.fallback_assignee ?? settings.fallback_assignee,
           slack_webhook_url: data.slack_webhook_url ?? settings.slack_webhook_url,
-          admin_token: data.admin_token ?? settings.admin_token,
           automation_mode: data.automation_mode ?? settings.automation_mode,
         };
         if (typeof window !== 'undefined') {
@@ -872,7 +1052,7 @@ export const api = {
   },
 
   testSlackWebhook: async (webhookUrl?: string): Promise<{ ok: boolean; message: string }> => {
-    const res = await fetch(`${BACKEND_URL}/api/notifications/slack/test`, {
+    const res = await apiFetch(`${BACKEND_URL}/api/notifications/slack/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ webhook_url: webhookUrl || undefined }),
@@ -884,24 +1064,40 @@ export const api = {
     return { ok: true, message: data.message || 'Test notification delivered to Slack successfully!' };
   },
 
-  isAuthenticated: (): boolean => {
+  isAuthenticated: async (): Promise<boolean> => {
     if (typeof window === 'undefined') return true;
-    return document.cookie.includes('ichnoscope_admin_auth=true');
+    try {
+      const { createClient } = await import('@/lib/supabase/client');
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      return !!user;
+    } catch {
+      return false;
+    }
   },
 
-  login: (password: string): boolean => {
-    return password === 'ichnoscope' || password === 'admin';
-  },
+  login: (_password: string): boolean => false,
 
-  logout: (): void => {
+  logout: async (): Promise<void> => {
     if (typeof window !== 'undefined') {
+      try {
+        const { createClient } = await import('@/lib/supabase/client');
+        const supabase = createClient();
+        await supabase.auth.signOut();
+      } catch {
+        // Fallback
+      }
       document.cookie = 'ichnoscope_admin_auth=; Max-Age=0; path=/;';
     }
   },
 
-  replaySavedFixture: async (fixture: string): Promise<any> => {
+  replaySavedFixture: async (fixture: string, projectId?: string): Promise<any> => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/runs/replay?fixture=${encodeURIComponent(fixture)}`, {
+      let endpoint = `${BACKEND_URL}/api/runs/replay?fixture=${encodeURIComponent(fixture)}`;
+      if (projectId && projectId !== 'global') {
+        endpoint += `&project_id=${encodeURIComponent(projectId)}`;
+      }
+      const res = await apiFetch(endpoint, {
         method: 'POST',
       });
       if (res.ok) {
@@ -914,13 +1110,263 @@ export const api = {
 
     const runs = getStoredRuns();
     const newRun = {
-      ...runs[0],
+      ...(runs[0] || {}),
       id: `run-${Date.now().toString(36)}`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      project_id: projectId && projectId !== 'global' ? projectId : undefined,
     };
     runs.unshift(newRun);
     saveStoredRuns(runs);
     return toRunItem(newRun);
   },
+
+  getProjects: async (forceFresh = false): Promise<Project[]> => {
+    const userToken = await getCurrentUserToken();
+    syncUserCacheScope(userToken);
+    const now = Date.now();
+    if (!forceFresh && _projectsCache && now - _projectsCache.time < 3000) {
+      return _projectsCache.data;
+    }
+    if (_projectsInFlight) {
+      return _projectsInFlight;
+    }
+
+    _projectsInFlight = (async () => {
+      try {
+        const res = await apiFetch(`${BACKEND_URL}/api/projects`, { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            _projectsCache = { data, time: Date.now() };
+            return data;
+          }
+        }
+      } catch {
+        // Fallback
+      } finally {
+        _projectsInFlight = null;
+      }
+      return _projectsCache ? _projectsCache.data : [];
+    })();
+
+    return _projectsInFlight;
+  },
+
+  createProject: async (payload: ProjectCreateInput): Promise<Project> => {
+    invalidateClientCache();
+    const res = await apiFetch(`${BACKEND_URL}/api/projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to create project');
+    }
+    invalidateClientCache();
+    return res.json();
+  },
+
+  rotateProjectKey: async (projectId: string): Promise<Project> => {
+    invalidateClientCache();
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/keys/rotate`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to rotate project credentials');
+    }
+    invalidateClientCache();
+    return res.json();
+  },
+
+  deleteProject: async (projectId: string): Promise<void> => {
+    invalidateClientCache();
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to delete project');
+    }
+    invalidateClientCache();
+  },
+
+  updateProject: async (projectId: string, payload: ProjectUpdateInput): Promise<Project> => {
+    invalidateClientCache();
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to update project');
+    }
+    invalidateClientCache();
+    return res.json();
+  },
+
+  getGitHubInstallUrl: async (projectId: string): Promise<{ install_url: string; app_name: string; project_id: string }> => {
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/github/install-url`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to get GitHub App install URL');
+    }
+    return res.json();
+  },
+
+  getGitHubRepos: async (projectId: string, installationId?: string): Promise<GitHubRepo[]> => {
+    const query = installationId ? `?installation_id=${encodeURIComponent(installationId)}` : '';
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/github/repos${query}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to list GitHub repositories');
+    }
+    return res.json();
+  },
+
+  connectGitHubRepo: async (
+    projectId: string,
+    installationId: string | number,
+    repo: string,
+    fallbackAssignee?: string
+  ): Promise<Project> => {
+    invalidateClientCache();
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/github/connect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        installation_id: installationId,
+        repo,
+        fallback_assignee: fallbackAssignee,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to link GitHub repository');
+    }
+    invalidateClientCache();
+    return res.json();
+  },
+
+  getWorkspaceMetrics: async (projectId?: string, forceFresh = false): Promise<WorkspaceMetrics> => {
+    const userToken = await getCurrentUserToken();
+    syncUserCacheScope(userToken);
+    const cacheKey = projectId || 'all';
+    const now = Date.now();
+    const cached = _metricsCache[cacheKey];
+    if (!forceFresh && cached && now - cached.time < 3000) {
+      return cached.data;
+    }
+    const inFlight = _metricsInFlight[cacheKey];
+    if (inFlight) {
+      return inFlight;
+    }
+
+    _metricsInFlight[cacheKey] = (async () => {
+      try {
+        const targetProj = projectId && projectId !== 'all' && projectId !== 'global' ? projectId : undefined;
+        const url = targetProj
+          ? `${BACKEND_URL}/api/workspace/metrics?project_id=${encodeURIComponent(targetProj)}`
+          : `${BACKEND_URL}/api/workspace/metrics`;
+        const res = await apiFetch(url, { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          _metricsCache[cacheKey] = { data, time: Date.now() };
+          return data;
+        }
+      } catch {
+        // Fallback
+      } finally {
+        delete _metricsInFlight[cacheKey];
+      }
+      return _metricsCache[cacheKey]?.data || {
+        total_runs: 0,
+        staged_raw_count: 0,
+        staged_draft_count: 0,
+        published_count: 0,
+        dismissed_count: 0,
+        active_projects_count: 1,
+        incident_rate_per_min: 0,
+        project_id: projectId || 'ALL_PROJECTS',
+        projects: [],
+      };
+    })();
+
+    return _metricsInFlight[cacheKey];
+  },
+
+  disconnectGitHubRepo: async (projectId: string): Promise<Project> => {
+    invalidateClientCache();
+    const res = await apiFetch(`${BACKEND_URL}/api/projects/${projectId}/github/disconnect`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to disconnect GitHub repository');
+    }
+    invalidateClientCache();
+    return res.json();
+  },
+
+  getWorkspaceUsers: async (forceFresh = false): Promise<WorkspaceMember[]> => {
+    const userToken = await getCurrentUserToken();
+    syncUserCacheScope(userToken);
+    const now = Date.now();
+    if (!forceFresh && _usersCache && now - _usersCache.time < 5000) {
+      return _usersCache.data;
+    }
+    try {
+      const res = await apiFetch(`${BACKEND_URL}/api/workspace/users`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          _usersCache = { data, time: Date.now() };
+          return data;
+        }
+      }
+    } catch {
+      // Fallback
+    }
+    return _usersCache ? _usersCache.data : [];
+  },
+
+  getUserWorkspaces: async (forceFresh = false): Promise<WorkspaceItem[]> => {
+    const userToken = await getCurrentUserToken();
+    syncUserCacheScope(userToken);
+    const now = Date.now();
+    if (!forceFresh && _workspacesCache && now - _workspacesCache.time < 5000) {
+      return _workspacesCache.data;
+    }
+    try {
+      const res = await apiFetch(`${BACKEND_URL}/api/workspaces`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          _workspacesCache = { data, time: Date.now() };
+          return data;
+        }
+      }
+    } catch {
+      // Fallback
+    }
+    return _workspacesCache ? _workspacesCache.data : [];
+  },
 };
+
+export interface WorkspaceMember {
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: 'owner' | 'admin' | 'editor' | 'viewer';
+  created_at?: number;
+}
+
+export interface WorkspaceItem {
+  workspace_id: string;
+  name: string;
+  owner_id: string;
+  created_at: number;
+}

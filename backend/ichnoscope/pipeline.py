@@ -61,6 +61,32 @@ def _light_parse(payload: dict, settings: Settings, state: RunState) -> None:
             state.environment = payload_env
 
 
+def _infer_project_id(payload: dict, explicit_project_id: str | None = None) -> str:
+    """Resolve project_id from argument, payload fields, or payload contents."""
+    if explicit_project_id:
+        return explicit_project_id
+    if not isinstance(payload, dict):
+        return "checkout-service"
+    if payload.get("project_id"):
+        return str(payload["project_id"])
+    if payload.get("projectId"):
+        return str(payload["projectId"])
+
+    release = str(payload.get("release", ""))
+    payload_str = str(payload)
+    if "myshop" in release or "cart" in payload_str:
+        return "myshop-backend"
+    if "inventory" in payload_str:
+        return "inventory-service"
+    if "auth" in payload_str:
+        return "auth-service"
+    if "edge" in payload_str or "gateway" in payload_str:
+        return "edge-gateway"
+    if "payment" in payload_str or "checkout" in payload_str:
+        return "checkout-service"
+    return "checkout-service"
+
+
 def stage_raw_incident(
     payload: dict,
     *,
@@ -73,10 +99,11 @@ def stage_raw_incident(
     """Persist an incoming event as Gate 1 `staged_raw` with zero Git/LLM calls."""
     settings = _settings(settings)
     active_run_id = _new_run_id(run_id)
+    resolved_proj_id = _infer_project_id(payload, project_id)
     state = RunState(
         payload=payload,
         status="staged_raw",
-        project_id=project_id,
+        project_id=resolved_proj_id,
         environment=environment,
     )
     log = _logger_for(active_run_id, state, db_path)
@@ -114,7 +141,11 @@ def execute_investigation(
     state.status = "analyzing"
     save_run(run_id, state, db_path=db_path)
 
-    http_client = client or httpx.Client()
+    import time
+    start_time = time.monotonic()
+    max_timeout_s = float(getattr(settings, "pipeline_timeout_seconds", 45.0))
+
+    http_client = client or httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0))
     close_client = client is None
 
     try:
@@ -145,6 +176,8 @@ def execute_investigation(
                     count=bump_count,
                     settings=settings,
                     client=http_client,
+                    project_id=state.project_id,
+                    db_path=db_path,
                 )
             state.status = "suppressed"
             save_run(run_id, state, db_path=db_path)
@@ -153,7 +186,7 @@ def execute_investigation(
         log("dedupe", f"Claimed new incident fingerprint: {fp}")
 
         state.status = "blaming"
-        blame_res = find_culprit(incident, settings=settings, client=http_client)
+        blame_res = find_culprit(incident, settings=settings, client=http_client, project_id=state.project_id)
         state.culprit = blame_res.culprit
         if blame_res.culprit:
             log(
@@ -167,15 +200,24 @@ def execute_investigation(
             log("blame", f"No suspect identified: {blame_res.error or 'blame inconclusive'}", level="WARN")
 
         state.status = "explaining"
-        explain_res = explain_with_details(
-            incident,
-            state.culprit,
-            other_commits=blame_res.other_commits,
-            settings=settings,
-            client=http_client,
-        )
-        state.explanation = explain_res.explanation
-        if explain_res.explanation:
+        if (time.monotonic() - start_time) > max_timeout_s:
+            log(
+                "pipeline",
+                f"Pipeline exceeded {max_timeout_s}s timeout after blame. Falling back to evidence-only template.",
+                level="WARN",
+            )
+            explain_res = None
+        else:
+            explain_res = explain_with_details(
+                incident,
+                state.culprit,
+                other_commits=blame_res.other_commits,
+                settings=settings,
+                client=http_client,
+            )
+
+        if explain_res and explain_res.explanation:
+            state.explanation = explain_res.explanation
             log(
                 "explain",
                 f"Root cause hypothesis generated via {explain_res.source} "
@@ -184,13 +226,28 @@ def execute_investigation(
         else:
             log(
                 "explain",
-                f"LLM explanation unavailable: {explain_res.reason}. Falling back to evidence-only template.",
+                f"LLM explanation unavailable: {explain_res.reason if explain_res else 'timed out'}. Falling back to evidence-only template.",
                 level="WARN",
             )
 
         severity, severity_reason = rate_with_reason(incident, settings=settings)
         state.severity = severity
         log("severity", f"Rated severity: {severity} ({severity_reason})")
+
+        repo = settings.github_repository
+        fallback_assignee = settings.fallback_assignee
+        if state.project_id:
+            try:
+                from ichnoscope.projects import get_project
+
+                proj = get_project(state.project_id, db_path=db_path)
+                if proj:
+                    if proj.github_repo or proj.github_repo_override:
+                        repo = proj.github_repo or proj.github_repo_override
+                    if proj.fallback_assignee:
+                        fallback_assignee = proj.fallback_assignee
+            except Exception:
+                pass
 
         draft = build_issue_draft(
             incident=incident,
@@ -200,8 +257,8 @@ def execute_investigation(
             severity_reason=severity_reason,
             fingerprint=fp,
             is_regression=state.is_regression,
-            repo=settings.github_repository,
-            fallback_assignee=settings.fallback_assignee,
+            repo=repo,
+            fallback_assignee=fallback_assignee,
         )
         if not state.draft_title_override:
             state.draft_title_override = draft.title
@@ -249,6 +306,35 @@ def publish_draft_issue(
     body = body_override or state.draft_body_override
     assignee = custom_assignee or state.custom_assignee
 
+    repo_override = None
+    channel_override = None
+    webhook_override = None
+    token_override = None
+    if state.project_id:
+        try:
+            from ichnoscope.projects import get_project
+            from ichnoscope.github_app import get_github_app_service
+
+            proj = get_project(state.project_id, db_path=db_path)
+            if proj:
+                if proj.github_installation_id and proj.github_repo:
+                    repo_override = proj.github_repo
+                    try:
+                        token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+                    except Exception as token_err:
+                        log("dispatch", f"Failed to get GitHub App installation token: {token_err}", level="WARN")
+                elif proj.github_repo or proj.github_repo_override:
+                    repo_override = proj.github_repo or proj.github_repo_override
+
+                if proj.slack_channel_override:
+                    channel_override = proj.slack_channel_override
+                if proj.webhook_url:
+                    webhook_override = proj.webhook_url
+                if proj.fallback_assignee and not assignee:
+                    assignee = proj.fallback_assignee
+        except Exception as exc:
+            log("dispatch", f"Error resolving project settings: {exc}", level="WARN")
+
     try:
         pub_res = publish_issue(
             incident=state.incident,
@@ -262,6 +348,10 @@ def publish_draft_issue(
             title_override=title,
             body_override=body,
             assignee_override=assignee,
+            repo_override=repo_override,
+            token_override=token_override,
+            project_id=state.project_id,
+            db_path=db_path,
         )
         state.issue_url = pub_res.issue_url
         state.status = "published"
@@ -273,6 +363,8 @@ def publish_draft_issue(
             severity=state.severity or "P3-Medium",
             assignee=pub_res.assignee,
             issue_url=pub_res.issue_url,
+            webhook_url=webhook_override,
+            channel_override=channel_override,
             settings=settings,
             client=http_client,
         )
@@ -408,11 +500,13 @@ def run_pipeline(
     db_path: str | None = None,
     settings: Settings | None = None,
     client: httpx.Client | None = None,
+    project_id: str | None = None,
 ) -> RunState:
     """Compatibility wrapper used by tests and replay: investigate immediately, optionally publish."""
     settings = _settings(settings)
     active_run_id = _new_run_id(run_id)
-    state = RunState(payload=payload, status="received")
+    resolved_proj_id = _infer_project_id(payload, project_id)
+    state = RunState(payload=payload, status="received", project_id=resolved_proj_id)
     log = _logger_for(active_run_id, state, db_path)
     log("gateway", f"Received incident payload for run {active_run_id}")
     save_run(active_run_id, state, db_path=db_path)

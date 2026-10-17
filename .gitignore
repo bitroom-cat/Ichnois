@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Distribution / packaging
 .Python
@@ -219,3 +222,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Private keys
+*.pem
+*.key

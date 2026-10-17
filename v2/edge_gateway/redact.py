@@ -17,6 +17,11 @@ PATTERNS = [
         re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9_-]{3,64}/[A-Za-z0-9_-]{3,64}/[A-Za-z0-9_-]{10,64}"),
         "[REDACTED:slack_webhook]",
     ),
+    # URL credentials (keep scheme, user, and host; redact only password)
+    (
+        re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^:\s/@]+):(?!\[REDACTED:)([^@\s/]+)(@[^/\s]+)"),
+        r"\1:[REDACTED:url_credentials]\3",
+    ),
     # GitHub Tokens (ghp_, gho_, github_pat_)
     (
         re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b|\bgithub_pat_[A-Za-z0-9_]{22,255}\b"),
@@ -31,6 +36,21 @@ PATTERNS = [
     (
         re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
         "[REDACTED:google_key]",
+    ),
+    # Slack Tokens (xoxb, xoxp, etc.)
+    (
+        re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,255}\b"),
+        "[REDACTED:slack_token]",
+    ),
+    # Stripe API Keys
+    (
+        re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,255}\b"),
+        "[REDACTED:stripe_key]",
+    ),
+    # LLM API Keys (OpenAI, Groq, Anthropic, etc.)
+    (
+        re.compile(r"\bsk-[A-Za-z0-9_-]{20,255}\b"),
+        "[REDACTED:llm_key]",
     ),
     # JWT Tokens
     (
@@ -48,6 +68,13 @@ PATTERNS = [
             r"""(?i)(["']?(?:[a-zA-Z0-9_]*(?:password|passwd|secret|token|api_key|apikey|access_key|client_secret)[a-zA-Z0-9_]*)["']?\s*[:=]\s*)(["'])(?!\[REDACTED:)([^"'\r\n]{8,})\2"""
         ),
         r"\1\2[REDACTED:secret_literal]\2",
+    ),
+    # Secret Environment Variable Assignments (ALL-CAPS key=unquoted_value 8+ chars)
+    (
+        re.compile(
+            r"""\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY)[A-Z0-9_]*\s*=\s*)(?!\[REDACTED:)([^\s(\[{\'"][^\s(\[{]{7,})"""
+        ),
+        r"\1[REDACTED:secret_env]",
     ),
     # Email Addresses
     (

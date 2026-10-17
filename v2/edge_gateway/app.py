@@ -27,16 +27,28 @@ if _CURRENT_DIR not in sys.path:
     sys.path.insert(0, _CURRENT_DIR)
 
 try:
-    from v2.edge_gateway.auth import AuthenticationError, authenticate_project_request
+    from v2.edge_gateway.auth import (
+        AuthenticationError,
+        authenticate_project_request,
+        get_all_cached_keys,
+        invalidate_project_key,
+        sync_keys_from_server_b,
+    )
     from v2.edge_gateway.config import get_gateway_config
-    from v2.edge_gateway.forwarder import forward_to_server_b
+    from v2.edge_gateway.forwarder import drain_dlq, forward_to_server_b
     from v2.edge_gateway.limiter import edge_ip_limiter, edge_project_limiter
     from v2.edge_gateway.redact import scrub_pii_and_secrets
     from v2.edge_gateway.security import SecurityPerimeterViolation, inspect_payload
 except ImportError:
-    from auth import AuthenticationError, authenticate_project_request
+    from auth import (
+        AuthenticationError,
+        authenticate_project_request,
+        get_all_cached_keys,
+        invalidate_project_key,
+        sync_keys_from_server_b,
+    )
     from config import get_gateway_config
-    from forwarder import forward_to_server_b
+    from forwarder import drain_dlq, forward_to_server_b
     from limiter import edge_ip_limiter, edge_project_limiter
     from redact import scrub_pii_and_secrets
     from security import SecurityPerimeterViolation, inspect_payload
@@ -195,9 +207,66 @@ async def ping_core_server() -> dict[str, object]:
         }
 
 
+async def _background_sync_worker():
+    """Periodically sync active project keys and opportunistically drain DLQ."""
+    while True:
+        try:
+            await asyncio.sleep(30.0)
+            sync_keys_from_server_b()
+            drain_dlq(max_batch=5)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.debug("Background worker pass error: %s", exc)
+
+
+@app.on_event("startup")
+async def on_startup():
+    """Initialize background synchronization task on gateway boot."""
+    try:
+        sync_keys_from_server_b(force=True)
+    except Exception:
+        pass
+    asyncio.create_task(_background_sync_worker())
+
+
+@app.post("/internal/v1/cache/keys/invalidate")
+async def invalidate_key_cache(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Instant cache eviction/refresh webhook from Server B."""
+    import hmac
+
+    expected_secret = config.internal_gateway_secret
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization.split("Bearer ", 1)[1].strip()
+    if not hmac.compare_digest(token, expected_secret):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    action = body.get("action", "sync")
+    public_key = body.get("public_key")
+
+    if action == "revoke" and public_key:
+        invalidate_project_key(public_key)
+        return {"status": "revoked", "public_key": public_key}
+
+    sync_keys_from_server_b(force=True)
+    return {"status": "synced", "active_keys": len(get_all_cached_keys())}
+
+
 # Layer 8: Telemetry Ingestion Endpoints (Sentry / GlitchTip / Native)
 @app.post("/api/{project_id}/envelope/")
 @app.post("/api/{project_id}/store/")
+@app.post("/api/api/{project_id}/envelope/")
+@app.post("/api/api/{project_id}/store/")
 @app.post("/api/v1/telemetry/ingest")
 async def ingest_telemetry(
     request: Request,
@@ -215,6 +284,11 @@ async def ingest_telemetry(
     except AuthenticationError as exc:
         logger.warning("Authentication failure from IP %s on project %s: %s", client_ip, project_id, exc)
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    # Resolve project_id if matched from synchronized project cache
+    cached_meta = getattr(request.state, "cached_project", None)
+    if cached_meta and cached_meta.get("project_id"):
+        project_id = cached_meta["project_id"]
 
     # Layer 6: Leaky-Bucket Rate Limiter (IP & Project)
     ip_check = edge_ip_limiter.check(client_ip)

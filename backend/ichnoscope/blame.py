@@ -176,6 +176,9 @@ def find_culprit(
     *,
     settings: Settings | None = None,
     client: httpx.Client | None = None,
+    repo_override: str | None = None,
+    token_override: str | None = None,
+    project_id: str | None = None,
 ) -> BlameResult:
     """Identify suspect commit correlating the failing line at release SHA with git history."""
     if settings is None:
@@ -187,9 +190,34 @@ def find_culprit(
     if settings.use_stub_github:
         return _build_stub_result(incident, settings)
 
+    # Dynamic project / GitHub App installation token lookup
+    window_hours = settings.window_hours
+    if project_id and not (token_override and repo_override):
+        try:
+            from ichnoscope.projects import get_project
+            from ichnoscope.github_app import get_github_app_service
+            proj = get_project(project_id)
+            if proj:
+                if proj.github_installation_id and proj.github_repo:
+                    if not repo_override:
+                        repo_override = proj.github_repo
+                    if not token_override:
+                        token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+                elif proj.github_repo or proj.github_repo_override:
+                    if not repo_override:
+                        repo_override = proj.github_repo or proj.github_repo_override
+                if proj.window_hours:
+                    window_hours = proj.window_hours
+        except Exception as exc:
+            logger.warning("Could not resolve dynamic GitHub App installation for project %s: %s", project_id, exc)
+
     owner = settings.github_owner
     repo = settings.github_repo_name
-    token = settings.github_token.get_secret_value() if settings.github_token else None
+    if repo_override and "/" in repo_override:
+        parts = repo_override.split("/", 1)
+        owner, repo = parts[0], parts[1]
+
+    token = token_override or (settings.github_token.get_secret_value() if settings.github_token else None)
 
     if not owner or not repo:
         return BlameResult(
@@ -204,7 +232,7 @@ def find_culprit(
 
     try:
         ref = incident.release_sha or "HEAD"
-        window_start = incident.occurred_at - timedelta(hours=settings.window_hours)
+        window_start = incident.occurred_at - timedelta(hours=window_hours)
 
         # 2. Try GraphQL blame query at release_sha
         gql_headers = {

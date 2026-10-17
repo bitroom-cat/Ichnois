@@ -5,6 +5,7 @@
     "users_affected": 2
   },
   "event_id": "e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2",
+  "project_id": "inventory-service",
   "platform": "python",
   "timestamp": "2026-10-04T14:30:00Z",
   "environment": "staging",

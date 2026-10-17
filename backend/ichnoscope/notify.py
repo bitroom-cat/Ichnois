@@ -17,11 +17,15 @@ def notify_slack(
     issue_url: str,
     *,
     webhook_url: str | None = None,
+    channel_override: str | None = None,
     settings: Settings | None = None,
     client: httpx.Client | None = None,
 ) -> bool:
     """Send formatted notification to Slack incoming webhook; always best-effort and non-blocking."""
     target_url = webhook_url
+    if channel_override and (channel_override.startswith("http://") or channel_override.startswith("https://")):
+        target_url = channel_override
+
     if not target_url:
         if settings is None:
             from ichnoscope.config import get_settings
@@ -36,7 +40,7 @@ def notify_slack(
     clean_title = redact(title)
     owner = assignee if assignee else "unassigned"
 
-    payload = {
+    payload: dict = {
         "text": f"*{clean_title}* ({severity}) - @{owner}: {issue_url}",
         "blocks": [
             {
@@ -52,6 +56,8 @@ def notify_slack(
             }
         ],
     }
+    if channel_override and not channel_override.startswith("http"):
+        payload["channel"] = channel_override
 
     http_client = client or httpx.Client()
     close_client = client is None

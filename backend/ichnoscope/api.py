@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ichnoscope.config import get_settings
@@ -38,7 +38,7 @@ def serialize_run(run_id: str, state: Any) -> dict[str, Any]:
         "fingerprint": state.fingerprint,
         "is_regression": state.is_regression,
         "issue_url": state.issue_url,
-        "project_id": state.project_id,
+        "project_id": state.project_id or "checkout-service",
         "environment": state.environment or (inc.environment if inc else None),
         "exception_type": inc.exception_type if inc else None,
         "error_message": inc.error_message if inc else None,
@@ -58,11 +58,13 @@ def serialize_run(run_id: str, state: Any) -> dict[str, Any]:
 
 @router.get("/runs")
 def api_list_runs(
+    request: Request,
     status: str | None = Query(default=None),
     severity: str | None = Query(default=None),
+    project_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[dict[str, Any]]:
-    """List recent incident triage runs for the Control Center board."""
+    """List recent incident triage runs for the Control Center board, optionally scoped to a project."""
     aliases = {
         "staged_draft": {"staged_draft", "draft_ready"},
         "draft_ready": {"staged_draft", "draft_ready"},
@@ -70,7 +72,25 @@ def api_list_runs(
         "analyzing": {"analyzing", "parsing", "blaming", "explaining"},
         "dismissed": {"dismissed", "rejected"},
     }
-    raw_runs = list_runs(limit=limit)
+    from ichnoscope.projects import list_projects
+    user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
+    is_admin = getattr(request.state, "is_admin", False)
+
+    if not is_admin and not workspace_id and not user_id:
+        return []
+
+    user_projects = [p.project_id for p in list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)]
+
+    if project_id and project_id not in ("ALL_PROJECTS", "all", "ALL"):
+        if not is_admin and project_id not in user_projects:
+            return []
+
+    raw_runs = list_runs(
+        limit=limit,
+        project_id=project_id,
+        allowed_project_ids=None if is_admin else user_projects,
+    )
     wanted = aliases.get(status, {status} if status else None)
     items: list[dict[str, Any]] = []
     for run_id, state in raw_runs:
@@ -82,12 +102,22 @@ def api_list_runs(
     return items
 
 
-@router.get("/runs/{run_id}")
-def api_get_run(run_id: str) -> dict[str, Any]:
+def get_run_details(run_id: str, request: Request | None = None) -> dict[str, Any]:
     """Retrieve detailed execution state and audit trail for a run."""
     state = get_run(run_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    user_id = getattr(request.state, "user_id", None) if (request and hasattr(request, "state")) else None
+    workspace_id = getattr(request.state, "workspace_id", None) if (request and hasattr(request, "state")) else None
+    is_admin = getattr(request.state, "is_admin", False) if (request and hasattr(request, "state")) else (True if request is None else False)
+    if not is_admin:
+        if not user_id and not workspace_id:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+        from ichnoscope.projects import list_projects
+        user_projects = {p.project_id for p in list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)}
+        if not state.project_id or state.project_id not in user_projects:
+            raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
     detailed_logs = get_run_logs(run_id)
 
@@ -95,6 +125,12 @@ def api_get_run(run_id: str) -> dict[str, Any]:
     payload["logs"] = detailed_logs if detailed_logs else state.logs
     payload["gate_reviews"] = list_gate_reviews(run_id)
     return payload
+
+
+@router.get("/runs/{run_id}")
+def api_get_run(run_id: str, request: Request) -> dict[str, Any]:
+    """Retrieve detailed execution state and audit trail for a run."""
+    return get_run_details(run_id, request=request)
 
 
 class RejectRequest(BaseModel):
@@ -330,8 +366,17 @@ class SlackTestRequest(BaseModel):
     webhook_url: str | None = None
 
 
+from ichnoscope.db import save_system_setting
+
+
 def _persist_env_update(updates: dict[str, str]) -> None:
-    """Best-effort persistence of updated env vars back to .env file if it exists."""
+    """Persist updated settings to SQLite/Turso database and best-effort to local .env file."""
+    for k, v in updates.items():
+        try:
+            save_system_setting(k, str(v))
+        except Exception:
+            pass
+
     for candidate in [Path("backend/.env"), Path(".env")]:
         if candidate.is_file():
             try:
@@ -364,8 +409,8 @@ def api_get_settings() -> dict[str, Any]:
     summary = settings.safe_summary()
     if settings.slack_webhook_url:
         summary["slack_webhook_url"] = settings.slack_webhook_url.get_secret_value()
-    if settings.admin_token:
-        summary["admin_token"] = settings.admin_token.get_secret_value()
+    # ADMIN_TOKEN is strictly confidential and permanently purged from client presentation
+    summary.pop("admin_token", None)
     return summary
 
 
@@ -426,8 +471,8 @@ def api_update_settings(req: SettingsUpdateRequest) -> dict[str, Any]:
     summary = settings.safe_summary()
     if settings.slack_webhook_url:
         summary["slack_webhook_url"] = settings.slack_webhook_url.get_secret_value()
-    if settings.admin_token:
-        summary["admin_token"] = settings.admin_token.get_secret_value()
+    # ADMIN_TOKEN is strictly confidential and permanently purged from client presentation
+    summary.pop("admin_token", None)
     return summary
 
 
@@ -446,11 +491,12 @@ def api_test_slack(req: SlackTestRequest | None = None) -> dict[str, Any]:
             detail="No Slack Webhook URL configured. Please enter a valid Slack webhook URL in Settings.",
         )
 
+    repo = settings.github_repository or "ichnoscope-org/incident-tracker"
     ok = notify_slack(
         title="Ichnoscope Incident Alert Test",
         severity="P2-High",
         assignee="ichnoscope-bot",
-        issue_url="https://github.com/vanshikarana06/ichnoscope_demo_we_app/issues/1",
+        issue_url=f"https://github.com/{repo}/issues/1",
         webhook_url=target_url,
     )
     if ok:
@@ -505,7 +551,7 @@ def api_get_health() -> list[dict[str, Any]]:
 
 
 @router.post("/runs/{run_id}/rerun")
-def api_rerun_run(run_id: str) -> dict[str, Any]:
+def api_rerun_run(run_id: str, request: Request) -> dict[str, Any]:
     """Re-run triage pipeline explanation for an existing run."""
     state = get_run(run_id)
     if not state or not state.incident:
@@ -518,15 +564,18 @@ def api_rerun_run(run_id: str) -> dict[str, Any]:
     state.explanation = exp_res.explanation
     state.logs.append(f"[INFO] admin: Re-ran triage explanation via {exp_res.provider or 'stub'}")
     save_run(run_id, state)
-    return api_get_run(run_id)
+    return get_run_details(run_id, request=request)
 
 
 @router.post("/runs/replay")
-def api_replay_fixture(fixture: str = "payment_npe") -> dict[str, Any]:
+def api_replay_fixture(
+    request: Request,
+    fixture: str = "payment_npe",
+    project_id: str | None = Query(default=None),
+) -> dict[str, Any]:
     """Trigger pipeline execution on a saved Sentry fixture and store the triaged incident."""
     import json
     from pathlib import Path
-    from ichnoscope.pipeline import run_pipeline
 
     fixtures_dir = Path(__file__).resolve().parents[1] / "fixtures"
     mapping = {
@@ -543,6 +592,429 @@ def api_replay_fixture(fixture: str = "payment_npe") -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Fixture '{filename}' not found at {fixtures_dir}")
 
     payload = json.loads(file_path.read_text(encoding="utf-8"))
+
+    if not project_id:
+        fixture_project_map = {
+            "payment_npe": "checkout-service",
+            "bug1_keyerror_payment.json": "checkout-service",
+            "auth_jwt": "myshop-backend",
+            "bug2_attributeerror_cart.json": "myshop-backend",
+            "db_leak": "inventory-service",
+            "edge_library_frame_last.json": "inventory-service",
+        }
+        project_id = fixture_project_map.get(fixture) or fixture_project_map.get(filename) or payload.get("project_id") or "checkout-service"
+
     settings = get_settings()
-    run_id, _state, _auto = ingest_incident(payload=payload, settings=settings, apply_policy=True)
-    return api_get_run(run_id)
+    run_id, _state, _auto = ingest_incident(
+        payload=payload,
+        settings=settings,
+        project_id=project_id,
+        apply_policy=True,
+    )
+    return get_run_details(run_id, request=request)
+
+
+class GitHubConnectRequest(BaseModel):
+    installation_id: str | int
+    repo: str
+    fallback_assignee: str | None = None
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str
+    environment: str = "production"
+    rate_limit_min: int = 120
+    github_repo_override: str | None = None
+    slack_channel_override: str | None = None
+    fallback_assignee: str | None = None
+    path_prefix_strip: str | None = None
+    window_hours: int = 24
+    automation_mode_override: str | None = None
+    webhook_url: str | None = None
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: str | None = None
+    environment: str | None = None
+    rate_limit_min: int | None = None
+    github_repo_override: str | None = None
+    slack_channel_override: str | None = None
+    github_installation_id: str | None = None
+    github_repo: str | None = None
+    fallback_assignee: str | None = None
+    path_prefix_strip: str | None = None
+    window_hours: int | None = None
+    automation_mode_override: str | None = None
+    webhook_url: str | None = None
+    is_active: bool | None = None
+
+
+@router.get("/projects")
+def api_list_projects(request: Request) -> list[dict[str, Any]]:
+    """List all registered projects with credentials and metadata for current workspace."""
+    from ichnoscope.projects import list_projects
+
+    user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
+    is_admin = getattr(request.state, "is_admin", False)
+
+    if not is_admin and not workspace_id and not user_id:
+        return []
+
+    projects = list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)
+    return [p.to_safe_dict() for p in projects]
+
+
+@router.post("/projects")
+def api_create_project(req: ProjectCreateRequest, request: Request) -> dict[str, Any]:
+    """Register a new application project and issue API keys for current workspace."""
+    from ichnoscope.projects import create_project
+
+    user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
+    project = create_project(
+        name=req.name,
+        environment=req.environment,
+        rate_limit_min=req.rate_limit_min,
+        github_repo_override=req.github_repo_override,
+        slack_channel_override=req.slack_channel_override,
+        fallback_assignee=req.fallback_assignee,
+        path_prefix_strip=req.path_prefix_strip,
+        window_hours=req.window_hours,
+        automation_mode_override=req.automation_mode_override,
+        owner_id=user_id,
+        workspace_id=workspace_id,
+    )
+    return project.model_dump()
+
+
+@router.get("/projects/{project_id}")
+def api_get_project(project_id: str, request: Request) -> dict[str, Any]:
+    """Retrieve details for a specific project."""
+    from ichnoscope.projects import get_project
+
+    user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
+    is_admin = getattr(request.state, "is_admin", False)
+    project = get_project(project_id, owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return project.to_safe_dict()
+
+
+@router.patch("/projects/{project_id}")
+def api_update_project(project_id: str, req: ProjectUpdateRequest, request: Request) -> dict[str, Any]:
+    """Update settings or active status for a specific project."""
+    from ichnoscope.projects import update_project
+
+    user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
+    is_admin = getattr(request.state, "is_admin", False)
+    updated = update_project(
+        project_id,
+        req.model_dump(exclude_unset=True),
+        owner_id=user_id,
+        workspace_id=workspace_id,
+        is_admin=is_admin,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found or access denied")
+    return updated.to_safe_dict()
+
+
+@router.delete("/projects/{project_id}")
+def api_delete_project(project_id: str, request: Request) -> dict[str, Any]:
+    """Delete a registered project."""
+    from ichnoscope.projects import delete_project
+
+    user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
+    is_admin = getattr(request.state, "is_admin", False)
+    ok = delete_project(project_id, owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found or access denied")
+    return {"status": "deleted", "project_id": project_id}
+
+
+@router.post("/projects/{project_id}/keys/rotate")
+def api_rotate_project_key(project_id: str, request: Request) -> dict[str, Any]:
+    """Rotate public and secret credentials for a registered project."""
+    from ichnoscope.projects import rotate_project_key
+
+    user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
+    is_admin = getattr(request.state, "is_admin", False)
+    project = rotate_project_key(project_id, owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found or access denied")
+    return project.model_dump()
+
+
+@router.get("/projects/{project_id}/github/install-url")
+def api_get_github_install_url(project_id: str) -> dict[str, Any]:
+    """Return GitHub App installation URL for linking a repository."""
+    from ichnoscope.config import get_settings
+    settings = get_settings()
+    app_name = settings.github_app_name or os.getenv("GITHUB_APP_NAME") or "ichnois-connection"
+    install_url = f"https://github.com/apps/{app_name}/installations/new?state={project_id}"
+    return {
+        "install_url": install_url,
+        "app_name": app_name,
+        "project_id": project_id,
+    }
+
+
+@router.get("/projects/{project_id}/github/repos")
+def api_list_github_repos(project_id: str, installation_id: str | None = None) -> list[dict[str, Any]]:
+    """List accessible GitHub repositories for a project or installation."""
+    from ichnoscope.github_app import get_github_app_service, GitHubAppError
+    from ichnoscope.projects import get_project
+
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+
+    target_inst = installation_id or project.github_installation_id
+    if not target_inst:
+        raise HTTPException(
+            status_code=400,
+            detail="No GitHub installation ID provided or linked to this project. Please install the GitHub App first."
+        )
+
+    try:
+        service = get_github_app_service()
+        repos = service.list_installation_repositories(target_inst)
+        return repos
+    except GitHubAppError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post("/projects/{project_id}/github/connect")
+def api_connect_github_repo(project_id: str, req: GitHubConnectRequest) -> dict[str, Any]:
+    """Connect a GitHub repository and installation to a project."""
+    from ichnoscope.projects import connect_github_project
+
+    updated = connect_github_project(
+        project_id,
+        req.installation_id,
+        req.repo,
+        fallback_assignee=req.fallback_assignee,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return updated.to_safe_dict()
+
+
+@router.post("/projects/{project_id}/github/disconnect")
+def api_disconnect_github_repo(project_id: str) -> dict[str, Any]:
+    """Disconnect GitHub repository from a project."""
+    from ichnoscope.projects import disconnect_github_project
+
+    updated = disconnect_github_project(project_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return updated.to_safe_dict()
+
+
+@router.get("/workspace/metrics")
+def api_get_workspace_metrics(
+    request: Request,
+    project_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Calculate aggregated incident metrics for the fleet or a specific microservice project."""
+    from ichnoscope.projects import list_projects
+    from ichnoscope.store import get_workspace_metrics
+
+    user_id = getattr(request.state, "user_id", None)
+    workspace_id = getattr(request.state, "workspace_id", None)
+    is_admin = getattr(request.state, "is_admin", False)
+
+    if not is_admin and not workspace_id and not user_id:
+        return {
+            "total_runs": 0,
+            "staged_raw_count": 0,
+            "staged_draft_count": 0,
+            "published_count": 0,
+            "dismissed_count": 0,
+            "active_projects_count": 0,
+            "avg_triage_latency_ms": 245.0,
+            "project_id": project_id or "ALL_PROJECTS",
+        }
+
+    user_projects = [p.project_id for p in list_projects(owner_id=user_id, workspace_id=workspace_id, is_admin=is_admin)]
+    return get_workspace_metrics(
+        project_id=project_id,
+        allowed_project_ids=None if is_admin else user_projects,
+    )
+
+
+@router.get("/internal/v1/projects/cache")
+@router.get("/internal/v1/projects/keys")
+def api_internal_projects_cache() -> dict[str, Any]:
+    """Internal cache synchronization endpoint for Server A (Edge Gateway)."""
+    from ichnoscope.projects import list_projects
+
+    projects = list_projects()
+    cache: dict[str, dict[str, Any]] = {}
+    for p in projects:
+        if p.is_active:
+            cache[p.public_key] = {
+                "project_id": p.project_id,
+                "name": p.name,
+                "environment": p.environment,
+                "rate_limit_min": p.rate_limit_min,
+            }
+    return {"projects": cache, "count": len(cache)}
+
+
+# ---------------------------------------------------------------------------
+# Team Membership & Role Management Endpoints
+# ---------------------------------------------------------------------------
+
+class TeamMemberAddRequest(BaseModel):
+    user_id: str
+    email: str = ""
+    display_name: str = ""
+    role: str = "viewer"
+
+
+class TeamMemberUpdateRequest(BaseModel):
+    role: str
+
+
+class UserProfileSyncRequest(BaseModel):
+    user_id: str
+    email: str
+    display_name: str = ""
+    avatar_url: str = ""
+
+
+@router.post("/user/sync")
+def api_sync_user_profile(req: UserProfileSyncRequest) -> dict[str, Any]:
+    """Upsert user profile from Supabase claims upon authentication."""
+    from ichnoscope.teams import upsert_user_profile
+
+    upsert_user_profile(
+        user_id=req.user_id,
+        email=req.email,
+        display_name=req.display_name or None,
+        avatar_url=req.avatar_url or None,
+    )
+    return {"status": "synced", "user_id": req.user_id}
+
+
+@router.get("/user/{user_id}/projects")
+def api_get_user_projects(user_id: str) -> dict[str, Any]:
+    """Retrieve all projects accessible to a user along with their granted role."""
+    from ichnoscope.teams import get_user_projects
+
+    projects = get_user_projects(user_id)
+    return {"projects": projects, "count": len(projects)}
+
+
+@router.get("/projects/{project_id}/members")
+def api_get_project_members(project_id: str) -> dict[str, Any]:
+    """List all team members assigned to a project."""
+    from ichnoscope.teams import get_project_members
+
+    members = get_project_members(project_id)
+    return {"project_id": project_id, "members": members, "count": len(members)}
+
+
+@router.post("/projects/{project_id}/members")
+def api_add_project_member(project_id: str, req: TeamMemberAddRequest) -> dict[str, Any]:
+    """Add or invite a member to a project with a specific role."""
+    from ichnoscope.teams import add_team_member, upsert_user_profile
+
+    if req.email:
+        upsert_user_profile(
+            user_id=req.user_id,
+            email=req.email,
+            display_name=req.display_name or None,
+        )
+
+    member = add_team_member(
+        project_id=project_id,
+        user_id=req.user_id,
+        role=req.role,
+        invited_by="admin",
+    )
+    return {"status": "added", "member": member}
+
+
+@router.patch("/projects/{project_id}/members/{user_id}")
+def api_update_project_member(
+    project_id: str, user_id: str, req: TeamMemberUpdateRequest
+) -> dict[str, Any]:
+    """Update a team member's role within a project."""
+    from ichnoscope.teams import update_member_role
+
+    try:
+        updated = update_member_role(
+            project_id=project_id,
+            user_id=user_id,
+            new_role=req.role,
+            actor_id="admin",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Member '{user_id}' not found in project '{project_id}'",
+        )
+    return {"status": "updated", "member": updated}
+
+
+@router.delete("/projects/{project_id}/members/{user_id}")
+def api_remove_project_member(project_id: str, user_id: str) -> dict[str, Any]:
+    """Remove a team member from a project."""
+    from ichnoscope.teams import remove_team_member
+
+    ok = remove_team_member(
+        project_id=project_id,
+        user_id=user_id,
+        actor_id="admin",
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Member '{user_id}' not found in project '{project_id}'",
+        )
+    return {"status": "removed", "project_id": project_id, "user_id": user_id}
+
+
+
+@router.get("/workspace/users")
+def api_get_workspace_users(request: Request) -> list[dict[str, Any]]:
+    """Return authorized users/members belonging to the caller's workspace."""
+    from ichnoscope.workspaces import list_workspace_members, get_user_workspace_id
+
+    workspace_id = getattr(request.state, "workspace_id", None)
+    user_id = getattr(request.state, "user_id", None)
+    if not workspace_id and user_id:
+        workspace_id = get_user_workspace_id(user_id)
+
+    if not workspace_id:
+        user_email = getattr(request.state, "user_email", "admin@ichnoscope.internal")
+        return [{
+            "user_id": user_id or "admin",
+            "role": "owner" if getattr(request.state, "is_admin", False) else "viewer",
+            "email": user_email,
+            "display_name": user_email.split("@")[0] if "@" in user_email else "Admin",
+            "created_at": 0.0,
+        }]
+
+    return list_workspace_members(workspace_id)
+
+
+@router.get("/workspaces")
+def api_get_user_workspaces(request: Request) -> list[dict[str, Any]]:
+    """List all workspaces for the authenticated user."""
+    from ichnoscope.workspaces import list_user_workspaces
+
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        return []
+    return list_user_workspaces(user_id)

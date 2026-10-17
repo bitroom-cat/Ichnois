@@ -26,6 +26,12 @@ services:
         sync: false
       - key: GITHUB_TOKEN
         sync: false
+      - key: GITHUB_APP_NAME
+        value: ichnois-connection
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: GROQ_API_KEY
@@ -34,3 +40,46 @@ services:
         sync: false
       - key: SLACK_WEBHOOK_URL
         sync: false
+      - key: INTERNAL_GATEWAY_SECRET
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://ichnoscope-wcc-30.vercel.app,http://localhost:3000
+      - key: AUTOMATION_MODE
+        value: semi_autonomous
+
+  # Server A: Standalone Ingestion Gateway (v2 Edge Sensor)
+  - type: web
+    name: ichnoscope-edge-gateway
+    runtime: python
+    region: oregon
+    plan: free
+    rootDir: v2/edge_gateway
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: INTERNAL_CORE_URL
+        value: https://ichnoscope-backend.onrender.com/internal/v1/incidents/ingress
+      - key: INTERNAL_GATEWAY_SECRET
+        sync: false
+      - key: EDGE_ALLOWED_PROJECT_KEYS
+        value: sentry_public_key,demo_key,prod_client_key
+      - key: EDGE_ENFORCE_AUTH_WHITELIST
+        value: "true"
+      - key: EDGE_ALLOWED_ORIGINS
+        value: https://ichnoscope-wcc-30.vercel.app,http://localhost:3000
+      - key: MAX_BODY_BYTES
+        value: "51200"
+      - key: READ_TIMEOUT_SECONDS
+        value: "2.5"
+      - key: MAX_JSON_DEPTH
+        value: "10"
+      - key: IP_RATE_LIMIT_PER_MIN
+        value: "60"
+      - key: PROJECT_RATE_LIMIT_PER_MIN
+        value: "120"
+

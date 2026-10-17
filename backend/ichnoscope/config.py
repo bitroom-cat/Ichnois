@@ -6,6 +6,7 @@ Safe to import with no environment variables set; reads environment lazily via l
 import functools
 import os
 from collections.abc import Mapping
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr, SecretStr
 
@@ -119,6 +120,9 @@ class Settings(BaseModel):
     # GitHub and Sentry
     github_token: SecretStr | None = None
     github_repository: str | None = None
+    github_app_id: str | None = None
+    github_app_name: str | None = None
+    github_app_private_key_path: str | None = None
     sentry_client_secret: SecretStr | None = None
 
     # Behavior
@@ -248,7 +252,6 @@ class Settings(BaseModel):
             "github_repo_name": self.github_repo_name,
             "sentry_client_secret": "configured" if self.sentry_client_secret is not None else "missing",
             "slack_webhook_url": "configured" if self.slack_webhook_url is not None else "missing",
-            "admin_token": "configured" if self.admin_token is not None else "missing",
             "internal_gateway_secret": "configured" if self.internal_gateway_secret is not None else "missing",
             "automation_mode": self.automation_mode,
             "fallback_assignee": self.fallback_assignee,
@@ -268,9 +271,23 @@ class Settings(BaseModel):
 
 def load_settings(env: Mapping[str, str]) -> Settings:
     """Build a frozen Settings object from an environment mapping."""
+    merged_env = dict(env)
+    try:
+        from ichnoscope.db import get_system_settings
+        db_settings = get_system_settings()
+        for k, v in db_settings.items():
+            if not env.get(k):
+                merged_env[k] = v
+    except Exception:
+        pass
+    env = merged_env
+
     # GitHub and Sentry
     github_token = _parse_secret(env.get("GITHUB_TOKEN"))
     github_repository = _parse_str(env.get("GITHUB_REPOSITORY"))
+    github_app_id = _parse_str(env.get("GITHUB_APP_ID"))
+    github_app_name = _parse_str(env.get("GITHUB_APP_NAME")) or "ichnois-connection"
+    github_app_private_key_path = _parse_str(env.get("GITHUB_APP_PRIVATE_KEY_PATH"))
     sentry_client_secret = _parse_secret(env.get("SENTRY_CLIENT_SECRET"))
 
     # Database & Storage (Turso libSQL or Local SQLite)
@@ -288,7 +305,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     path_prefix_strip = raw_path_prefix if not raw_path_prefix or raw_path_prefix.endswith("/") else f"{raw_path_prefix}/"
     fallback_assignee = _parse_str(env.get("FALLBACK_ASSIGNEE"))
     slack_webhook_url = _parse_secret(env.get("SLACK_WEBHOOK_URL"))
-    admin_token = _parse_secret(env.get("ADMIN_TOKEN"))
+    admin_token = _parse_secret(env.get("ADMIN_TOKEN") or env.get("ICHNOSCOPE_ADMIN_TOKEN"))
     internal_gateway_secret = _parse_secret(
         env.get("INTERNAL_GATEWAY_SECRET") or env.get("INTERNAL_GATEWAY_TOKEN")
     )
@@ -333,6 +350,9 @@ def load_settings(env: Mapping[str, str]) -> Settings:
     settings = Settings(
         github_token=github_token,
         github_repository=github_repository,
+        github_app_id=github_app_id,
+        github_app_name=github_app_name,
+        github_app_private_key_path=github_app_private_key_path,
         sentry_client_secret=sentry_client_secret,
         path_prefix_strip=path_prefix_strip,
         fallback_assignee=fallback_assignee,
@@ -362,7 +382,10 @@ def get_settings() -> Settings:
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(override=False)
+        root_dir = Path(__file__).resolve().parents[2]
+        load_dotenv(root_dir / "backend" / ".env", override=False)
+        load_dotenv(root_dir / ".env", override=False)
     except ImportError:
         pass
     return load_settings(os.environ)

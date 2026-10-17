@@ -2,6 +2,7 @@
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
@@ -76,6 +77,10 @@ def publish_issue(
     title_override: str | None = None,
     body_override: str | None = None,
     assignee_override: str | None = None,
+    repo_override: str | None = None,
+    token_override: str | None = None,
+    project_id: str | None = None,
+    db_path: Path | str | None = None,
 ) -> PublishResult:
     """Publish a drafted incident issue to GitHub, honoring dry_run mode."""
     if settings is None:
@@ -83,9 +88,34 @@ def publish_issue(
 
         settings = get_settings()
 
+    # Dynamic project / GitHub App installation token lookup
+    if project_id and not (token_override and repo_override):
+        try:
+            from ichnoscope.projects import get_project
+            from ichnoscope.github_app import get_github_app_service
+            proj = get_project(project_id, db_path=db_path)
+            if proj:
+                if proj.github_installation_id and proj.github_repo:
+                    if not repo_override:
+                        repo_override = proj.github_repo
+                    if not token_override:
+                        token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+                elif proj.github_repo or proj.github_repo_override:
+                    if not repo_override:
+                        repo_override = proj.github_repo or proj.github_repo_override
+                if proj.fallback_assignee and not assignee_override:
+                    assignee_override = proj.fallback_assignee
+        except Exception as exc:
+            logger.warning("Could not resolve dynamic GitHub App installation for project %s: %s", project_id, exc)
+
     owner = settings.github_owner
     repo = settings.github_repo_name
-    token = settings.github_token.get_secret_value() if settings.github_token else None
+    target_repo_full = repo_override or settings.github_repository
+    if repo_override and "/" in repo_override:
+        parts = repo_override.split("/", 1)
+        owner, repo = parts[0], parts[1]
+
+    token = token_override or (settings.github_token.get_secret_value() if settings.github_token else None)
     fp = fingerprint or calc_fingerprint(incident)
 
     draft = build_issue_draft(
@@ -97,7 +127,7 @@ def publish_issue(
         fingerprint=fp,
         is_regression=is_regression,
         previous_issue_number=previous_issue_number,
-        repo=settings.github_repository,
+        repo=target_repo_full,
         fallback_assignee=assignee_override or settings.fallback_assignee,
     )
     if title_override:
@@ -176,6 +206,10 @@ def publish_repeat_comment(
     *,
     settings: Settings | None = None,
     client: httpx.Client | None = None,
+    repo_override: str | None = None,
+    token_override: str | None = None,
+    project_id: str | None = None,
+    db_path: Path | str | None = None,
 ) -> bool:
     """Post repeat occurrence comment to an open GitHub issue."""
     if settings is None:
@@ -186,9 +220,30 @@ def publish_repeat_comment(
     if settings.dry_run:
         return True
 
+    if project_id and not (token_override and repo_override):
+        try:
+            from ichnoscope.projects import get_project
+            from ichnoscope.github_app import get_github_app_service
+            proj = get_project(project_id, db_path=db_path)
+            if proj:
+                if proj.github_installation_id and proj.github_repo:
+                    if not repo_override:
+                        repo_override = proj.github_repo
+                    if not token_override:
+                        token_override = get_github_app_service().get_installation_token(proj.github_installation_id)
+                elif proj.github_repo or proj.github_repo_override:
+                    if not repo_override:
+                        repo_override = proj.github_repo or proj.github_repo_override
+        except Exception as exc:
+            logger.warning("Could not resolve dynamic GitHub App installation for project %s: %s", project_id, exc)
+
     owner = settings.github_owner
     repo = settings.github_repo_name
-    token = settings.github_token.get_secret_value() if settings.github_token else None
+    if repo_override and "/" in repo_override:
+        parts = repo_override.split("/", 1)
+        owner, repo = parts[0], parts[1]
+
+    token = token_override or (settings.github_token.get_secret_value() if settings.github_token else None)
 
     if not owner or not repo or not token:
         logger.warning("Cannot post comment: repository or token unconfigured")

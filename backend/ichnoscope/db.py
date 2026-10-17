@@ -36,6 +36,20 @@ class TursoCursor:
         return rem
 
 
+_TURSO_CLIENT: httpx.Client | None = None
+
+
+def get_turso_client() -> httpx.Client:
+    """Return a shared, persistent HTTP client for Turso pipeline requests with keep-alive connection pooling."""
+    global _TURSO_CLIENT
+    if _TURSO_CLIENT is None or _TURSO_CLIENT.is_closed:
+        _TURSO_CLIENT = httpx.Client(
+            timeout=10.0,
+            limits=httpx.Limits(max_keepalive_connections=30, max_connections=60, keepalive_expiry=120.0),
+        )
+    return _TURSO_CLIENT
+
+
 class TursoConnection:
     """Lightweight, thread-safe HTTP pipeline connection to Turso / libSQL database."""
 
@@ -47,7 +61,7 @@ class TursoConnection:
             normalized = f"https://{normalized}"
         self.endpoint = normalized.rstrip("/") + "/v2/pipeline"
         self.token = token
-        self._client = httpx.Client(timeout=15.0)
+        self._client = get_turso_client()
 
     def execute(self, sql: str, params: tuple | list = ()) -> TursoCursor:
         args = []
@@ -125,17 +139,37 @@ class TursoConnection:
         affected = result.get("affected_row_count", 0)
         return TursoCursor(rows, rowcount=affected)
 
+    def execute_batch(self, stmts: list[str]) -> None:
+        """Execute multiple SQL statements in a single pipeline HTTP round-trip."""
+        requests = [{"type": "execute", "stmt": {"sql": s, "args": []}} for s in stmts if s.strip()]
+        if not requests:
+            return
+        requests.append({"type": "close"})
+        try:
+            res = self._client.post(
+                self.endpoint,
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                },
+                json={"requests": requests},
+            )
+            res.raise_for_status()
+        except Exception as exc:
+            logger.debug("Turso batch execution non-fatal error: %s", exc)
+
     def commit(self) -> None:
         pass
 
     def close(self) -> None:
-        self._client.close()
+        # Keep connection open in pool for fast reuse
+        pass
 
     def __enter__(self) -> "TursoConnection":
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close()
+        pass
 
 
 def get_db_path(custom_path: str | Path | None = None) -> Path:
@@ -163,12 +197,30 @@ def get_db(db_path: str | Path | None = None) -> Iterator[Any]:
             yield conn
 
 
-def init_db(db_path: str | Path | None = None) -> Path | str:
-    """Initialize database tables for runs, execution logs, and incident deduplication."""
+_INITIALIZED_DBS: set[str] = set()
+
+
+def init_db(db_path: str | Path | None = None, force: bool = False) -> Path | str:
+    """Initialize database tables for runs, execution logs, and incident deduplication once per process."""
+    global _INITIALIZED_DBS
     turso_url = os.environ.get("TURSO_DATABASE_URL") or os.environ.get("TURSO_DB_URL") or os.environ.get("LIBSQL_URL")
     turso_token = os.environ.get("TURSO_AUTH_TOKEN") or os.environ.get("TURSO_TOKEN") or os.environ.get("LIBSQL_AUTH_TOKEN")
 
+    target_path = str(get_db_path(db_path))
+    is_turso = bool(turso_url and turso_token and db_path is None and DEFAULT_RUNS_DB == "ichnoscope_runs.db")
+    cache_key = f"turso:{turso_url}" if is_turso else target_path
+    if not force and cache_key in _INITIALIZED_DBS:
+        return turso_url if is_turso else get_db_path(db_path)
+
     tables = [
+        """
+        CREATE TABLE IF NOT EXISTS workspaces (
+            workspace_id TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            owner_id     TEXT NOT NULL,
+            created_at   REAL NOT NULL
+        );
+        """,
         """
         CREATE TABLE IF NOT EXISTS runs (
             id TEXT PRIMARY KEY,
@@ -180,6 +232,8 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             draft_title TEXT,
             draft_body TEXT,
             raw_payload TEXT,
+            project_id TEXT,
+            workspace_id TEXT,
             state_json TEXT NOT NULL,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
@@ -234,29 +288,99 @@ def init_db(db_path: str | Path | None = None) -> Path | str:
             secret_key TEXT NOT NULL,
             rate_limit_min INTEGER DEFAULT 120,
             environment TEXT DEFAULT 'production',
+            github_repo_override TEXT,
+            slack_channel_override TEXT,
+            github_installation_id TEXT,
+            github_repo TEXT,
+            description TEXT,
+            webhook_url TEXT,
+            fallback_assignee TEXT,
+            path_prefix_strip TEXT,
+            window_hours INTEGER DEFAULT 24,
+            automation_mode_override TEXT,
+            updated_at REAL,
+            owner_id TEXT,
+            workspace_id TEXT,
             is_active INTEGER DEFAULT 1,
             created_at REAL NOT NULL
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            user_id     TEXT PRIMARY KEY,
+            email       TEXT NOT NULL,
+            display_name TEXT,
+            avatar_url  TEXT,
+            created_at  REAL NOT NULL,
+            last_login  REAL
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS team_members (
+            id          TEXT PRIMARY KEY,
+            workspace_id TEXT DEFAULT 'ws_default',
+            project_id  TEXT,
+            user_id     TEXT NOT NULL,
+            role        TEXT NOT NULL DEFAULT 'viewer',
+            invited_by  TEXT,
+            created_at  REAL NOT NULL
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS team_audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id  TEXT NOT NULL,
+            actor_id    TEXT NOT NULL,
+            action      TEXT NOT NULL,
+            target_id   TEXT,
+            details     TEXT,
+            created_at  REAL NOT NULL
         );
         """,
         "CREATE INDEX IF NOT EXISTS idx_runs_updated ON runs (updated_at DESC);",
         "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs (status);",
         "CREATE INDEX IF NOT EXISTS idx_logs_run_id ON run_logs (run_id, timestamp);",
         "CREATE INDEX IF NOT EXISTS idx_gate_reviews_run ON gate_reviews (run_id, gate);",
+        "CREATE INDEX IF NOT EXISTS idx_project_keys_public ON project_keys (public_key);",
+        "CREATE INDEX IF NOT EXISTS idx_team_members_project ON team_members (project_id);",
+        "CREATE INDEX IF NOT EXISTS idx_workspaces_owner ON workspaces (owner_id);",
+        "CREATE INDEX IF NOT EXISTS idx_project_keys_ws ON project_keys (workspace_id);",
+        "CREATE INDEX IF NOT EXISTS idx_runs_ws ON runs (workspace_id);",
+        "CREATE INDEX IF NOT EXISTS idx_team_members_ws ON team_members (workspace_id, user_id);",
+        "CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members (user_id);",
+        "CREATE INDEX IF NOT EXISTS idx_team_audit_project ON team_audit_log (project_id, created_at DESC);",
     ]
 
     if turso_url and turso_token and db_path is None and DEFAULT_RUNS_DB == "ichnoscope_runs.db":
         with TursoConnection(turso_url.strip(), turso_token.strip()) as conn:
-            for stmt in tables:
-                conn.execute(stmt)
+            conn.execute_batch(tables)
             migrate_to_v2(conn)
+        _INITIALIZED_DBS.add(cache_key)
         return turso_url
 
     path = get_db_path(db_path)
     with sqlite3.connect(path) as conn:
         for stmt in tables:
-            conn.execute(stmt)
+            try:
+                conn.execute(stmt)
+            except Exception:
+                pass
         migrate_to_v2(conn)
+        for stmt in tables:
+            if "INDEX" in stmt:
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    pass
         conn.commit()
+    _INITIALIZED_DBS.add(cache_key)
     return path
 
 
@@ -269,6 +393,8 @@ def migrate_to_v2(conn: Any) -> None:
         "draft_title": "TEXT",
         "draft_body": "TEXT",
         "raw_payload": "TEXT",
+        "project_id": "TEXT",
+        "workspace_id": "TEXT",
     }
     existing: set[str] = set()
     try:
@@ -285,6 +411,10 @@ def migrate_to_v2(conn: Any) -> None:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {col_type};")
         except Exception as exc:  # noqa: BLE001
             logger.debug("Skipping ALTER TABLE for %s: %s", name, exc)
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_project ON runs (project_id, status);")
+    except Exception:
+        pass
 
     try:
         conn.execute(
@@ -321,10 +451,154 @@ def migrate_to_v2(conn: Any) -> None:
                 secret_key TEXT NOT NULL,
                 rate_limit_min INTEGER DEFAULT 120,
                 environment TEXT DEFAULT 'production',
+                github_repo_override TEXT,
+                slack_channel_override TEXT,
                 is_active INTEGER DEFAULT 1,
                 created_at REAL NOT NULL
             );
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workspaces (
+                workspace_id TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                owner_id     TEXT NOT NULL,
+                created_at   REAL NOT NULL
+            );
+            """
+        )
+        for col in [
+            "github_repo_override",
+            "slack_channel_override",
+            "github_installation_id",
+            "github_repo",
+            "description",
+            "webhook_url",
+            "fallback_assignee",
+            "path_prefix_strip",
+            "window_hours",
+            "automation_mode_override",
+            "updated_at",
+            "owner_id",
+            "workspace_id",
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE project_keys ADD COLUMN {col} TEXT;")
+            except Exception:
+                pass
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id     TEXT PRIMARY KEY,
+                email       TEXT NOT NULL,
+                display_name TEXT,
+                avatar_url  TEXT,
+                created_at  REAL NOT NULL,
+                last_login  REAL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS team_members (
+                id          TEXT PRIMARY KEY,
+                workspace_id TEXT DEFAULT 'ws_default',
+                project_id  TEXT,
+                user_id     TEXT NOT NULL,
+                role        TEXT NOT NULL DEFAULT 'viewer',
+                invited_by  TEXT,
+                created_at  REAL NOT NULL
+            );
+            """
+        )
+        try:
+            conn.execute("ALTER TABLE team_members ADD COLUMN workspace_id TEXT;")
+        except Exception:
+            pass
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS team_audit_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id  TEXT NOT NULL,
+                actor_id    TEXT NOT NULL,
+                action      TEXT NOT NULL,
+                target_id   TEXT,
+                details     TEXT,
+                created_at  REAL NOT NULL
+            );
+            """
+        )
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_team_members_project ON team_members (project_id);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members (user_id);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_team_audit_project ON team_audit_log (project_id, created_at DESC);")
+        except Exception:
+            pass
     except Exception as exc:  # noqa: BLE001
         logger.debug("Auxiliary table create skipped: %s", exc)
+
+    # Backfill legacy runs to ensure project_id is populated in column and state_json
+    try:
+        import json
+        cur = conn.execute("SELECT id, project_id, state_json, raw_payload FROM runs WHERE project_id IS NULL OR state_json LIKE '%\"project_id\": null%' OR state_json NOT LIKE '%\"project_id\"%';")
+        legacy_rows = cur.fetchall() if cur is not None else []
+        for r_id, col_p_id, s_raw, p_raw in legacy_rows:
+            p_id = col_p_id
+            if not p_id or p_id == "None":
+                combo = (p_raw or "") + " " + (s_raw or "")
+                if "myshop" in combo or "cart" in combo:
+                    p_id = "myshop-backend"
+                elif "inventory" in combo:
+                    p_id = "inventory-service"
+                elif "auth" in combo:
+                    p_id = "auth-service"
+                elif "edge" in combo or "gateway" in combo:
+                    p_id = "edge-gateway"
+                else:
+                    p_id = "checkout-service"
+
+            new_s_json = s_raw
+            if s_raw:
+                try:
+                    s_dict = json.loads(s_raw)
+                    if not s_dict.get("project_id"):
+                        s_dict["project_id"] = p_id
+                        new_s_json = json.dumps(s_dict)
+                except Exception:
+                    pass
+            conn.execute("UPDATE runs SET project_id = ?, state_json = ? WHERE id = ?;", (p_id, new_s_json, r_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Legacy project_id backfill skipped: %s", exc)
+
+
+def save_system_setting(key: str, value: str, db_path: Path | str | None = None) -> None:
+    """Persist system setting to SQLite/Turso database."""
+    init_db(db_path)
+    import time
+    now = time.time()
+    with get_db(db_path) as conn:
+        cursor = conn.execute("SELECT key FROM system_settings WHERE key = ?;", (key,))
+        if cursor.fetchone():
+            conn.execute("UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?;", (value, now, key))
+        else:
+            conn.execute("INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?);", (key, value, now))
+
+
+def get_system_settings(db_path: Path | str | None = None) -> dict[str, str]:
+    """Retrieve all persisted system settings from SQLite/Turso database."""
+    init_db(db_path)
+    with get_db(db_path) as conn:
+        cursor = conn.execute("SELECT key, value FROM system_settings;")
+        rows = cursor.fetchall()
+        return {r[0]: r[1] for r in rows}
+

@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { api, RunItem } from '@/lib/api';
+import { api, RunItem, getSelectedProjectId, setSelectedProjectId } from '@/lib/api';
 import {
   Search,
   CheckCircle2,
@@ -40,11 +40,13 @@ export default function RunsListPage() {
   const [replaying, setReplaying] = useState(false);
   const [replayMode, setReplayMode] = useState<'auto' | 'gate1_manual'>('auto');
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectIdState] = useState<string>('all');
 
-  const fetchRuns = async () => {
+  const fetchRuns = async (projId?: string) => {
     setLoading(true);
     try {
-      const data = await api.getRuns();
+      const pid = projId !== undefined ? projId : getSelectedProjectId();
+      const data = await api.getRuns(pid);
       setRuns(data);
     } finally {
       setLoading(false);
@@ -52,13 +54,25 @@ export default function RunsListPage() {
   };
 
   useEffect(() => {
-    fetchRuns();
+    const initialPid = getSelectedProjectId();
+    setSelectedProjectIdState(initialPid);
+    fetchRuns(initialPid);
+
+    const onProjectChanged = () => {
+      const updatedPid = getSelectedProjectId();
+      setSelectedProjectIdState(updatedPid);
+      fetchRuns(updatedPid);
+    };
+
+    window.addEventListener('project_changed', onProjectChanged);
+    return () => window.removeEventListener('project_changed', onProjectChanged);
   }, []);
 
   const triggerReplay = async (fixture: 'payment_npe' | 'auth_jwt' | 'db_leak') => {
     setReplaying(true);
     try {
-      const newRun = await api.replaySavedFixture(fixture);
+      const projId = selectedProjectId !== 'all' ? selectedProjectId : undefined;
+      const newRun = await api.replaySavedFixture(fixture, projId);
       // If user selected manual Gate 1 staging simulation, drop it into staged_raw
       if (replayMode === 'gate1_manual') {
         const stagedRun = {
@@ -247,6 +261,26 @@ export default function RunsListPage() {
       </div>
 
       {/* Search & Tabs Filter Row (Render Style) */}
+      {selectedProjectId !== 'all' && (
+        <div className="flex items-center justify-between p-2.5 rounded-lg bg-purple-500/10 border border-purple-500/20 text-xs text-purple-600 dark:text-purple-400">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
+            <span>
+              Filtered by Project: <strong className="font-mono">{selectedProjectId}</strong>
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedProjectId('all');
+            }}
+            className="text-xs font-medium underline hover:text-purple-700 dark:hover:text-purple-300"
+          >
+            Show All Projects
+          </button>
+        </div>
+      )}
+
       <div className="border-b border-border-subtle flex flex-col md:flex-row md:items-center justify-between gap-3 pb-0">
         {/* Render Tabs */}
         <div className="flex items-center gap-1 overflow-x-auto text-xs">

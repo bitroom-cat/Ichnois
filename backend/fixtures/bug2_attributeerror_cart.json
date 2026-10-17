@@ -5,6 +5,7 @@
     "users_affected": 11
   },
   "event_id": "b9f1a2c3d4e5f6a7b8c9d0e1f2a3b4c5",
+  "project_id": "myshop-backend",
   "platform": "python",
   "timestamp": 1791114000.5,
   "environment": "production",

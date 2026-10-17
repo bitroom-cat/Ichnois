@@ -111,3 +111,22 @@ def test_attach_and_regression_delete(tmp_path: Path):
 
     # Can now be re-claimed cleanly
     assert claim(fp, db_path=db_file, now=2000.0) is True
+
+
+def test_stale_claim_reclamation(tmp_path: Path):
+    db_file = tmp_path / "test_stale.db"
+    fp = "998877665544"
+
+    # Initial claim at t=1000
+    assert claim(fp, db_path=db_file, now=1000.0) is True
+
+    # Duplicate claim within 300s fails
+    assert claim(fp, db_path=db_file, now=1200.0, stale_timeout_s=300.0) is False
+
+    # Stale claim after 300s (e.g. t=1305) without attached issue is reclaimed!
+    assert claim(fp, db_path=db_file, now=1305.0, stale_timeout_s=300.0) is True
+
+    # If issue was attached, it is NOT reclaimed even after timeout (it's active)
+    attach(fp, issue_number=101, db_path=db_file)
+    assert claim(fp, db_path=db_file, now=2000.0, stale_timeout_s=300.0) is False
+
